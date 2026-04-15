@@ -1,0 +1,14 @@
+{
+  "name": "collaborative-mixer-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for the BEAM/Rust audio mixer",
+  "main": "app.js",
+  "scripts": {
+    "dev": "live-server --port=8080 --cors"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "live-server": "^1.2.2"
+  }
+}

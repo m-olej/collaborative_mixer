@@ -1,0 +1,32 @@
+# =========================
+# Zależności i Build (Elixir)
+# =========================
+/backend/_build/
+/backend/cover/
+/backend/doc/
+/backend/.fetch
+/backend/deps/
+*.ez
+*.beam
+**/erl_crash.dump
+**/crash.dump
+
+# =========================
+# Zależności i Build (Rust)
+# =========================
+/backend/native/mixer_dsp/target/
+**/*.rs.bk
+
+# =========================
+# Zależności i Build (Node.js)
+# =========================
+/frontend/node_modules/
+npm-debug.log
+yarn-error.log
+
+# =========================
+# System i Edytory
+# =========================
+.vscode/
+*.swp
+*.swo
