@@ -8,6 +8,7 @@
 import Config
 
 config :backend,
+  ecto_repos: [Backend.Repo],
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the endpoint
@@ -19,7 +20,7 @@ config :backend, BackendWeb.Endpoint,
     layout: false
   ],
   pubsub_server: Backend.PubSub,
-  live_view: [signing_salt: "QG200JV7"]
+  live_view: [signing_salt: "X595kMlm"]
 
 # Configure Elixir's Logger
 config :logger, :default_formatter,

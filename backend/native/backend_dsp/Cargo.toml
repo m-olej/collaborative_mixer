@@ -1,16 +1,17 @@
 [package]
-name = "mixer_dsp"
+name = "backend_dsp"
 version = "0.1.0"
 authors = []
 edition = "2021"
 
 [lib]
-name = "mixer_dsp"
-path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-biquad = "0.6.0"
-rustfft = "6.4.1"
 rustler = "0.37.3"
 symphonia = { version = "0.5.5", features = ["all"] }
+biquad = "0.6.0"
+rustfft = "6.4.1"
+hound = "3.5.1"
+rubato = "2.0.0"
+tempfile = "3.27.0"

@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:17
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cloud_daw_dev
+    volumes:
+      - cloud_daw_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000" # Port API (kompatybilny z S3)
+      - "9001:9001" # Port panelu Web UI
+    volumes:
+      - cloud_daw_object_data:/data
+
+volumes:
+  cloud_daw_db_data:
+  cloud_daw_object_data:

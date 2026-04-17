@@ -1,5 +1,15 @@
 import Config
 
+# Configure your database
+config :backend, Backend.Repo,
+  username: "postgres",
+  password: "postgres",
+  hostname: "localhost",
+  database: "cloud_daw_dev",
+  stacktrace: true,
+  show_sensitive_data_on_connection_error: true,
+  pool_size: 10
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #
@@ -13,8 +23,19 @@ config :backend, BackendWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "24C5jHPgwH106rzZ4MBRFoSJzHrtpXksGBdFPiDK+GUmUajLwoeJJe3fD83vERmy",
+  secret_key_base: "XoKNmLdwEukvyzBr5hDt/kjZxwPrZmlOnzXCioxc89hM9lmmh2lOmRM/wg8SWAW5",
   watchers: []
+
+# Konfiguracja MinIO (Lokalne S3)
+config :ex_aws,
+  access_key_id: "minioadmin",
+  secret_access_key: "minioadmin",
+  region: "local"
+
+config :ex_aws, :s3,
+  scheme: "http://",
+  host: "localhost",
+  port: 9000
 
 # ## SSL Support
 #

@@ -7,7 +7,7 @@ defmodule BackendWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_backend_key",
-    signing_salt: "hSHebCY5",
+    signing_salt: "DtDJACmG",
     same_site: "Lax"
   ]
 
@@ -31,6 +31,7 @@ defmodule BackendWeb.Endpoint do
   # :code_reloader configuration of your endpoint.
   if code_reloading? do
     plug Phoenix.CodeReloader
+    plug Phoenix.Ecto.CheckRepoStatus, otp_app: :backend
   end
 
   plug Plug.RequestId

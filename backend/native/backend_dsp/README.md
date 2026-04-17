@@ -1,4 +1,4 @@
-# NIF for Elixir.Backend.MixerDsp
+# NIF for Backend.DSP
 
 ## To build the NIF module:
 
@@ -7,8 +7,8 @@
 ## To load the NIF:
 
 ```elixir
-defmodule Backend.MixerDsp do
-  use Rustler, otp_app: :backend, crate: "mixer_dsp"
+defmodule Backend.DSP do
+  use Rustler, otp_app: :backend, crate: "backend_dsp"
 
   # When your NIF is loaded, it will override this function.
   def add(_a, _b), do: :erlang.nif_error(:nif_not_loaded)
