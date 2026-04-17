@@ -1,4 +1,4 @@
-use rustler::{Atom, NifResult};
+use rustler::NifResult;
 
 mod atoms {
     rustler::atoms! {

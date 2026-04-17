@@ -7,5 +7,14 @@ defmodule BackendWeb.Router do
 
   scope "/api", BackendWeb do
     pipe_through :api
+
+    get "/ping", PingController, :index
+
+    resources "/projects", ProjectController, except: [:new, :edit] do
+      post "/actions/merge-tracks", ProjectController, :merge_tracks
+      resources "/exports", ExportController, only: [:index, :show, :create, :delete]
+    end
+
+    resources "/samples", SampleController, except: [:new, :edit, :update]
   end
 end
