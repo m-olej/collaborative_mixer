@@ -28,6 +28,14 @@ export function useAudioWorklet() {
     nodeRef.current?.port.postMessage(pcm);
   }, []);
 
+  /**
+   * Additively mix PCM into the ring buffer at the current playback position.
+   * Used for polyphonic note preview — overlapping notes are summed together.
+   */
+  const mixPcm = useCallback((pcm: Float32Array) => {
+    nodeRef.current?.port.postMessage({ type: "mix", pcm });
+  }, []);
+
   /** Tear down the audio context. */
   const destroy = useCallback(() => {
     nodeRef.current?.disconnect();
@@ -36,5 +44,8 @@ export function useAudioWorklet() {
     nodeRef.current = null;
   }, []);
 
-  return { init, feedPcm, destroy };
+  /** Get the underlying AudioContext (for creating AudioBufferSourceNodes). */
+  const getContext = useCallback(() => ctxRef.current, []);
+
+  return { init, feedPcm, mixPcm, getContext, destroy };
 }

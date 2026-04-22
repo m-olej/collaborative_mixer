@@ -1,7 +1,8 @@
+name: cloud-daw
+
 services:
-  db:
+  postgres:
     image: postgres:17
-    container_name: postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

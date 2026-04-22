@@ -3,13 +3,14 @@ defmodule Backend.Projects.Project do
   import Ecto.Changeset
 
   schema "projects" do
-    field :name, :string
-    field :bpm, :integer, default: 120
-    field :time_signature, :string, default: "4/4"
-    field :lock_version, :integer, default: 1
+    field(:name, :string)
+    field(:bpm, :integer, default: 120)
+    field(:time_signature, :string, default: "4/4")
+    field(:count_in_note_value, :string, default: "quarter")
+    field(:lock_version, :integer, default: 1)
 
-    has_many :tracks, Backend.Projects.Track
-    has_many :exports, Backend.Exports.Export
+    has_many(:tracks, Backend.Projects.Track)
+    has_many(:exports, Backend.Exports.Export)
 
     timestamps(type: :utc_datetime)
   end
@@ -17,7 +18,7 @@ defmodule Backend.Projects.Project do
   @doc "Changeset for creating or updating a project."
   def changeset(project, attrs) do
     project
-    |> cast(attrs, [:name, :bpm, :time_signature])
+    |> cast(attrs, [:name, :bpm, :time_signature, :count_in_note_value])
     |> validate_required([:name, :bpm])
     |> validate_number(:bpm, greater_than: 0, less_than: 999)
     |> optimistic_lock(:lock_version)

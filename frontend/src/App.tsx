@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { ProjectList } from "./components/ProjectList";
-import { MixerView } from "./components/MixerView";
+import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import type { Project } from "./types/daw";
 
 function App() {
@@ -28,11 +28,13 @@ function App() {
         )}
       </header>
 
-      <main className="mx-auto max-w-4xl">
+      <main>
         {activeProject ? (
-          <MixerView projectId={activeProject.id} />
+          <ProjectWorkspace project={activeProject} />
         ) : (
-          <ProjectList onSelect={handleSelect} />
+          <div className="mx-auto max-w-4xl">
+            <ProjectList onSelect={handleSelect} />
+          </div>
         )}
       </main>
     </div>
@@ -40,3 +42,4 @@ function App() {
 }
 
 export default App;
+

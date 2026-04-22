@@ -46,7 +46,7 @@ export const api = {
 
   updateProject: async (
     id: number,
-    data: Partial<Pick<Project, "name" | "bpm" | "time_signature">>,
+    data: Partial<Pick<Project, "name" | "bpm" | "time_signature" | "count_in_note_value">>,
     etag: string,
   ): Promise<Project> => {
     const res = await fetch(`${BASE}/projects/${id}`, {

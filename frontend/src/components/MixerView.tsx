@@ -1,39 +1,81 @@
-import { useEffect } from "react";
+import type { Project } from "../types/daw";
 import { useSocketStore } from "../store/useSocketStore";
 import { SpectrumCanvas } from "./SpectrumCanvas";
+import { TrackStrip } from "./Mixer/TrackStrip";
+import { MasterBus } from "./Mixer/MasterBus";
+import { SampleBrowser } from "./Mixer/SampleBrowser";
 
-/** Mixer view for a single project session. Shows connection status and spectrum. */
-export function MixerView({ projectId }: { projectId: number }) {
-  const { connect, disconnect, connected, mixerState } = useSocketStore();
+interface MixerViewProps {
+  project: Project;
+}
 
-  useEffect(() => {
-    connect(projectId);
-    return () => disconnect();
-  }, [projectId, connect, disconnect]);
+/**
+ * Mixer view for a single project session.
+ *
+ * Layout:
+ *  ┌─────────────────────────────────────────┐
+ *  │  Spectrum visualiser (full width)        │
+ *  ├──────────────────────────┬──────────────┤
+ *  │  Track strips + Master   │ Sample library│
+ *  │  (horizontal scroll)     │ (sidebar)     │
+ *  └──────────────────────────┴──────────────┘
+ *
+ * The WebSocket connection is owned by ProjectWorkspace, not this component.
+ * This component only reads from useSocketStore.
+ */
+export function MixerView({ project }: MixerViewProps) {
+  const { channel, mixerState } = useSocketStore();
+
+  const trackIds = mixerState ? Object.keys(mixerState.tracks) : [];
 
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <div className="flex items-center gap-2">
-        <div
-          className={`h-3 w-3 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
-        />
-        <span className="text-sm text-gray-300">
-          {connected ? "Connected" : "Disconnected"}
-        </span>
-        {mixerState && (
-          <span className="ml-auto text-xs text-gray-500">
-            Project #{mixerState.project_id} · Master: {Math.round(mixerState.master_volume * 100)}%
-          </span>
-        )}
+    <div className="flex flex-col" style={{ height: "calc(100vh - 88px)" }}>
+      {/* ── Spectrum visualiser ─────────────────────────────────────────── */}
+      <div className="border-b border-gray-800 px-4 py-3">
+        <p className="mb-1 text-[10px] uppercase tracking-widest text-gray-500">
+          Master Spectrum
+        </p>
+        <SpectrumCanvas />
       </div>
 
-      <SpectrumCanvas />
+      {/* ── Main area ───────────────────────────────────────────────────── */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Track strips — horizontal scrollable channel area */}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="border-b border-gray-800 px-4 py-2">
+            <p className="text-xs text-gray-500">
+              {trackIds.length === 0
+                ? "No tracks — add samples from the library"
+                : `${trackIds.length} track${trackIds.length !== 1 ? "s" : ""}`}
+            </p>
+          </div>
 
-      <div className="rounded bg-gray-800 p-4 text-sm text-gray-400">
-        {connected
-          ? "WebSocket channel joined. Mixer state synchronized."
-          : "Connecting to project session..."}
+          <div className="flex flex-1 gap-3 overflow-x-auto p-4">
+            {trackIds.map((id) => (
+              <TrackStrip
+                key={id}
+                trackId={id}
+                initial={mixerState!.tracks[id]}
+                channel={channel}
+              />
+            ))}
+
+            {/* Master bus — always last in the strip row */}
+            <MasterBus
+              masterVolume={mixerState?.master_volume ?? 1.0}
+              playing={mixerState?.playing ?? false}
+              bpm={project.bpm}
+              channel={channel}
+            />
+          </div>
+        </div>
+
+        {/* Sample browser sidebar */}
+        <div className="w-64 shrink-0 overflow-y-auto border-l border-gray-800">
+          <SampleBrowser />
+        </div>
       </div>
     </div>
   );
 }
+
