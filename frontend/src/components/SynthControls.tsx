@@ -25,9 +25,6 @@ import { Keyboard, type NoteEvent } from "./Keyboard";
 // ---------------------------------------------------------------------------
 
 const DEBOUNCE_MS = 150;
-const SPECTRUM_WIDTH = 512;
-const CANVAS_HEIGHT = 120;
-const OSC_SAMPLES = 1024;
 
 // ---------------------------------------------------------------------------
 // Component
@@ -47,11 +44,6 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
   const { init: initWorklet, feedPcm, getContext, destroy: destroyWorklet } = useAudioWorklet();
 
   // ── Real-time refs ────────────────────────────────────────────────────────
-  const fftDataRef = useRef<Uint8Array>(new Uint8Array(SPECTRUM_WIDTH));
-  const oscDataRef = useRef<Float32Array>(new Float32Array(OSC_SAMPLES));
-  const animFrameRef = useRef<number>(0);
-  const spectrumCanvasRef = useRef<HTMLCanvasElement>(null);
-  const oscCanvasRef = useRef<HTMLCanvasElement>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Active note preview sources: midi → { source, gain }
@@ -69,29 +61,14 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
     return () => destroyWorklet();
   }, [initWorklet, destroyWorklet]);
 
-  // ── Canvas draw loop ──────────────────────────────────────────────────────
-  useEffect(() => {
-    const draw = () => {
-      drawSpectrum(spectrumCanvasRef.current, fftDataRef.current);
-      drawOscilloscope(oscCanvasRef.current, oscDataRef.current);
-      animFrameRef.current = requestAnimationFrame(draw);
-    };
-    animFrameRef.current = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(animFrameRef.current);
-  }, []);
+  // ── Canvas draw loop removed — visualization now handled by AudioVisualization ──
 
   // ── WebSocket binary handler (server-rendered audio) ──────────────────────
   useEffect(() => {
     if (!channel) return;
     const ref = channel.on("audio_buffer", (payload: unknown) => {
       if (!(payload instanceof ArrayBuffer)) return;
-      fftDataRef.current = new Uint8Array(payload, 4, 512);
       const pcm = new Float32Array(payload, 516);
-      const copyLen = Math.min(pcm.length, OSC_SAMPLES);
-      oscDataRef.current.set(pcm.subarray(0, copyLen), 0);
-      if (copyLen < OSC_SAMPLES) {
-        oscDataRef.current.fill(0, copyLen);
-      }
       feedPcm(pcm);
     });
     return () => channel.off("audio_buffer", ref);
@@ -109,17 +86,8 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
       const header = new Uint8Array(payload, 0, 4);
       const midi = header[1];
 
-      // Extract FFT + PCM from the wire frame.
-      const fft = new Uint8Array(payload, 4, 512);
+      // Extract PCM from the wire frame.
       const pcm = new Float32Array(payload, 516);
-
-      // Update visualisation with the latest note preview
-      fftDataRef.current = fft;
-      const copyLen = Math.min(pcm.length, OSC_SAMPLES);
-      oscDataRef.current.set(pcm.subarray(0, copyLen), 0);
-      if (copyLen < OSC_SAMPLES) {
-        oscDataRef.current.fill(0, copyLen);
-      }
 
       // Stop any existing source for this MIDI note (re-trigger).
       const existing = activeNotesRef.current.get(midi);
@@ -224,28 +192,6 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
       <h2 className="text-lg font-semibold tracking-wide text-indigo-400">
         Synthesizer
       </h2>
-
-      {/* ── Canvases ─────────────────────────────────────────────────── */}
-      <div className="flex gap-3">
-        <div className="flex-1">
-          <label className="text-xs text-gray-500">Spectrum</label>
-          <canvas
-            ref={spectrumCanvasRef}
-            width={SPECTRUM_WIDTH}
-            height={CANVAS_HEIGHT}
-            className="w-full rounded bg-gray-950"
-          />
-        </div>
-        <div className="flex-1">
-          <label className="text-xs text-gray-500">Oscilloscope</label>
-          <canvas
-            ref={oscCanvasRef}
-            width={SPECTRUM_WIDTH}
-            height={CANVAS_HEIGHT}
-            className="w-full rounded bg-gray-950"
-          />
-        </div>
-      </div>
 
       {/* ── Oscillator + Unison ──────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4">
@@ -517,64 +463,4 @@ function SelectControl({ label, value, options, onChange }: SelectControlProps) 
       </select>
     </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Canvas drawing helpers
-// ---------------------------------------------------------------------------
-
-function drawSpectrum(canvas: HTMLCanvasElement | null, data: Uint8Array): void {
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const W = canvas.width;
-  const H = canvas.height;
-  const barWidth = W / data.length;
-
-  ctx.clearRect(0, 0, W, H);
-
-  for (let i = 0; i < data.length; i++) {
-    const barH = (data[i] / 255) * H;
-    const hue = (i / data.length) * 240;
-    ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
-    ctx.fillRect(i * barWidth, H - barH, barWidth - 0.5, barH);
-  }
-}
-
-function drawOscilloscope(canvas: HTMLCanvasElement | null, data: Float32Array): void {
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const W = canvas.width;
-  const H = canvas.height;
-  const midY = H / 2;
-
-  ctx.clearRect(0, 0, W, H);
-
-  ctx.strokeStyle = "#374151";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, midY);
-  ctx.lineTo(W, midY);
-  ctx.stroke();
-
-  if (data.length === 0) return;
-
-  ctx.strokeStyle = "#6366f1";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-
-  const step = W / data.length;
-  for (let i = 0; i < data.length; i++) {
-    const y = midY - data[i] * midY * 0.9;
-    if (i === 0) {
-      ctx.moveTo(0, y);
-    } else {
-      ctx.lineTo(i * step, y);
-    }
-  }
-
-  ctx.stroke();
 }

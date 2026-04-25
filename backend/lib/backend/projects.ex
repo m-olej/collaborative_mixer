@@ -56,7 +56,15 @@ defmodule Backend.Projects do
   def list_tracks(project_id) do
     Track
     |> where([t], t.project_id == ^project_id)
+    |> order_by([t], asc: t.lane_index, asc: t.position_ms)
     |> Repo.all()
+  end
+
+  def get_track(id) do
+    case Repo.get(Track, id) do
+      nil -> {:error, :not_found}
+      track -> {:ok, track}
+    end
   end
 
   def get_track!(id), do: Repo.get!(Track, id)
@@ -64,8 +72,33 @@ defmodule Backend.Projects do
   def create_track(project_id, attrs) do
     %Track{}
     |> Track.changeset(attrs)
-    |> Ecto.Changeset.put_change(:project_id, project_id)
+    |> Ecto.Changeset.put_change(:project_id, to_integer(project_id))
     |> Repo.insert()
+  end
+
+  def update_track(%Track{} = track, attrs) do
+    track
+    |> Track.update_changeset(attrs)
+    |> Repo.update()
+  end
+
+  def delete_track(%Track{} = track) do
+    Repo.delete(track)
+  end
+
+  @doc "Compute an ETag string from a track's id and updated_at."
+  def track_etag(%Track{id: id, updated_at: ts}) do
+    :crypto.hash(:md5, "track:#{id}:#{DateTime.to_iso8601(ts)}")
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc "Verify that the supplied ETag matches the track's current ETag."
+  def verify_track_etag(%Track{} = track, client_etag) do
+    if track_etag(track) == client_etag do
+      :ok
+    else
+      {:error, :etag_mismatch}
+    end
   end
 
   @doc """
@@ -100,4 +133,7 @@ defmodule Backend.Projects do
       new_track
     end)
   end
+
+  defp to_integer(val) when is_integer(val), do: val
+  defp to_integer(val) when is_binary(val), do: String.to_integer(val)
 end

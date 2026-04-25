@@ -91,4 +91,20 @@ defmodule Backend.DSP do
   """
   def mix_voices(_pcm_binaries, _offsets, _total_samples),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Generate waveform peaks from raw PCM audio data for timeline thumbnails.
+
+  ## Arguments
+
+  * `audio_binary` — binary containing f32 little-endian PCM samples.
+  * `num_bins`     — number of output bins (typically ~200).
+
+  ## Returns
+
+  A list of `{min, max}` tuples representing the amplitude range per bin.
+  Marked `DirtyCpu` in Rust — may process large audio files.
+  """
+  def generate_waveform_peaks(_audio_binary, _num_bins),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

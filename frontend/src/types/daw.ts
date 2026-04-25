@@ -17,7 +17,11 @@ export interface Track {
   name: string;
   s3_key: string;
   position_ms: number;
+  lane_index: number;
+  lock_version: number;
   project_id: number;
+  inserted_at: string;
+  updated_at: string;
 }
 
 export interface Sample {
@@ -28,7 +32,13 @@ export interface Sample {
   duration_ms: number | null;
   input_history: RecordedNote[] | null;
   bar_count: number;
+  waveform_peaks: WaveformPeak[] | null;
   inserted_at: string;
+}
+
+export interface WaveformPeak {
+  min: number;
+  max: number;
 }
 
 export interface Export {
@@ -54,6 +64,8 @@ export interface PaginatedResponse<T> {
 export interface TrackMixerState {
   volume: number;
   muted: boolean;
+  solo: boolean;
+  pan: number;
   eq: EqSettings;
 }
 
@@ -236,3 +248,27 @@ export function clicksPerBar(
   const multiplier = countInNoteValue === "sixteenth" ? 4 : countInNoteValue === "eighth" ? 2 : 1;
   return Math.round(barQuarterNotes * multiplier);
 }
+
+// ---------------------------------------------------------------------------
+// Collaboration types
+// ---------------------------------------------------------------------------
+
+export interface CollabUser {
+  username: string;
+  color: string;
+}
+
+export interface RemoteUser extends CollabUser {
+  cursor: { x: number; y: number } | null;
+  selection: CollabSelection | null;
+}
+
+export type CollabSelection =
+  | { type: "timeline_clip"; id: number }
+  | { type: "library_sample"; id: number };
+
+// ---------------------------------------------------------------------------
+// Timeline / snap types
+// ---------------------------------------------------------------------------
+
+export type SnapResolution = "bar" | "beat" | "1/8" | "1/16" | "free";

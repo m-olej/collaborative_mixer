@@ -44,6 +44,9 @@ mod interface;
 /// Voice mixing and limiting for polyphonic bar rendering.
 mod mixer;
 
+/// Waveform peak generation for timeline thumbnail display.
+mod waveform;
+
 use engine::{render, render_pcm_only, SAMPLE_RATE};
 use interface::build_synth_frame;
 use state::SynthState;
@@ -184,6 +187,34 @@ fn mix_voices<'a>(
     owned.as_mut_slice().copy_from_slice(&frame);
 
     Ok(owned.release(env))
+}
+
+/// Generate waveform peaks from raw PCM audio data for timeline thumbnails.
+///
+/// # Arguments (from Elixir)
+/// * `audio_binary` — binary containing f32 LE PCM samples.
+/// * `num_bins`     — number of output bins (typically ~200).
+///
+/// # Returns
+/// A list of `%{min: f32, max: f32}` maps for Elixir consumption.
+#[rustler::nif(schedule = "DirtyCpu")]
+#[allow(unused_variables)]
+fn generate_waveform_peaks<'a>(
+    env: Env<'a>,
+    audio_binary: Binary<'a>,
+    num_bins: i64,
+) -> NifResult<Vec<(f32, f32)>> {
+    let bins = num_bins.max(1) as usize;
+
+    // Decode f32 LE PCM from binary.
+    let pcm: Vec<f32> = audio_binary
+        .as_slice()
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    let peaks = waveform::compute_waveform_peaks(&pcm, bins);
+    Ok(peaks)
 }
 
 // ---------------------------------------------------------------------------

@@ -31,9 +31,10 @@ defmodule BackendWeb.ProjectChannel do
   use BackendWeb, :channel
 
   alias Backend.DawSession.SessionServer
+  alias BackendWeb.Presence
 
   @impl true
-  def join("project:" <> project_id, _payload, socket) do
+  def join("project:" <> project_id, payload, socket) do
     case Integer.parse(project_id) do
       {id, ""} ->
         # Ensure a session GenServer is running for this project.
@@ -41,7 +42,19 @@ defmodule BackendWeb.ProjectChannel do
         SessionServer.ensure_started(id)
         state = SessionServer.get_state(id)
 
-        socket = assign(socket, :project_id, id)
+        # Extract user identity from join params (ephemeral, stored in localStorage).
+        username = Map.get(payload, "username", "Anonymous")
+        color = Map.get(payload, "color", "#6366f1")
+
+        socket =
+          socket
+          |> assign(:project_id, id)
+          |> assign(:username, username)
+          |> assign(:user_color, color)
+
+        # Track presence after join (must be done via send to self).
+        send(self(), :after_join)
+
         {:ok, %{state: state}, socket}
 
       _ ->
@@ -138,6 +151,15 @@ defmodule BackendWeb.ProjectChannel do
     project_id = socket.assigns.project_id
     genre = Map.get(payload, "genre")
     input_history = Map.get(payload, "input_history")
+    # Ecto :map requires a map, but the frontend sends an array of notes.
+    # Wrap it so the jsonb column gets a proper map.
+    input_history_map =
+      cond do
+        is_map(input_history) -> input_history
+        is_list(input_history) -> %{"notes" => input_history}
+        true -> nil
+      end
+
     bar_duration_ms = Map.get(payload, "bar_duration_ms")
     bar_count = Map.get(payload, "bar_count", 1)
 
@@ -148,13 +170,30 @@ defmodule BackendWeb.ProjectChannel do
 
     duration_ms = if is_number(bar_duration_ms), do: round(bar_duration_ms), else: 2000
 
+    # Generate waveform peaks from the last rendered bar audio (if available).
+    waveform_peaks =
+      case Backend.DawSession.SessionServer.get_last_bar_render(project_id) do
+        {:ok, pcm_binary} when is_binary(pcm_binary) ->
+          case Backend.DSP.generate_waveform_peaks(pcm_binary, 200) do
+            peaks when is_list(peaks) ->
+              Enum.map(peaks, fn {min_v, max_v} -> %{"min" => min_v, "max" => max_v} end)
+
+            _ ->
+              nil
+          end
+
+        _ ->
+          nil
+      end
+
     attrs = %{
       "name" => name,
       "genre" => genre,
       "s3_key" => s3_key,
       "duration_ms" => duration_ms,
-      "input_history" => input_history,
-      "bar_count" => bar_count
+      "input_history" => input_history_map,
+      "bar_count" => bar_count,
+      "waveform_peaks" => waveform_peaks
     }
 
     case Backend.Samples.create_sample(attrs) do
@@ -173,8 +212,47 @@ defmodule BackendWeb.ProjectChannel do
   end
 
   # ---------------------------------------------------------------------------
+  # Collaboration events — cursor tracking and selection
+  # ---------------------------------------------------------------------------
+
+  @impl true
+  def handle_in("cursor_move", %{"x" => x, "y" => y}, socket) do
+    broadcast_from!(socket, "cursor_move", %{
+      user: socket.assigns.username,
+      color: socket.assigns.user_color,
+      x: x,
+      y: y
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("selection_update", payload, socket) do
+    broadcast_from!(socket, "selection_update", %{
+      user: socket.assigns.username,
+      color: socket.assigns.user_color,
+      selection: payload
+    })
+
+    {:noreply, socket}
+  end
+
+  # ---------------------------------------------------------------------------
   # Outgoing events — server → client
   # ---------------------------------------------------------------------------
+
+  # Track presence after successful join.
+  @impl true
+  def handle_info(:after_join, socket) do
+    Presence.track(socket, socket.assigns.username, %{
+      color: socket.assigns.user_color,
+      online_at: System.system_time(:second)
+    })
+
+    push(socket, "presence_state", Presence.list(socket))
+    {:noreply, socket}
+  end
 
   # Receive mixer audio frames from the SessionServer (type byte 1) and forward
   # them as binary WebSocket messages to this client.

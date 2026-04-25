@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/rest";
 import type { Sample } from "../../types/daw";
+import { useCollabStore } from "../../store/useCollabStore";
+import { useSocketStore } from "../../store/useSocketStore";
 
 const PAGE_SIZE = 20;
 
@@ -104,13 +106,45 @@ export function SampleBrowser() {
 // ---------------------------------------------------------------------------
 
 function SampleRow({ sample }: { sample: Sample }) {
+  const { localSelection, setLocalSelection, remoteUsers } = useCollabStore();
+  const pushSelectionUpdate = useSocketStore((s) => s.pushSelectionUpdate);
+
   const duration =
     sample.duration_ms != null
       ? `${(sample.duration_ms / 1000).toFixed(1)}s`
       : "—";
 
+  const isSelected =
+    localSelection?.type === "library_sample" && localSelection.id === sample.id;
+  const remoteSelectors = Object.values(remoteUsers).filter(
+    (u) => u.selection?.type === "library_sample" && u.selection.id === sample.id,
+  );
+
+  const borderColor = isSelected
+    ? "#6366f1"
+    : remoteSelectors.length > 0
+      ? remoteSelectors[0].color
+      : undefined;
+
+  const handleClick = () => {
+    const sel = isSelected ? null : { type: "library_sample" as const, id: sample.id };
+    setLocalSelection(sel);
+    pushSelectionUpdate(sel);
+  };
+
+  const handleDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.setData("application/json", JSON.stringify(sample));
+    e.dataTransfer.effectAllowed = "copy";
+  };
+
   return (
-    <li className="flex items-center gap-2 px-4 py-2.5 hover:bg-gray-800">
+    <li
+      draggable
+      onDragStart={handleDragStart}
+      onClick={handleClick}
+      className="flex cursor-grab items-center gap-2 px-4 py-2.5 hover:bg-gray-800"
+      style={borderColor ? { outline: `2px solid ${borderColor}`, outlineOffset: -2, borderRadius: 4 } : undefined}
+    >
       {/* Waveform icon placeholder */}
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-gray-700 text-gray-400 text-xs">
         ♪

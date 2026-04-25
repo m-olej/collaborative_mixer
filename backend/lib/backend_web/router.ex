@@ -13,6 +13,7 @@ defmodule BackendWeb.Router do
     resources "/projects", ProjectController, except: [:new, :edit] do
       post "/actions/merge-tracks", ProjectController, :merge_tracks
       resources "/exports", ExportController, only: [:index, :show, :create, :delete]
+      resources "/tracks", TrackController, only: [:index, :show, :create, :update, :delete]
     end
 
     resources "/samples", SampleController, except: [:new, :edit, :update]

@@ -1,9 +1,11 @@
-import type { Project } from "../types/daw";
+import { useEffect, useState } from "react";
+import type { Project, Sample } from "../types/daw";
 import { useSocketStore } from "../store/useSocketStore";
-import { SpectrumCanvas } from "./SpectrumCanvas";
 import { TrackStrip } from "./Mixer/TrackStrip";
 import { MasterBus } from "./Mixer/MasterBus";
 import { SampleBrowser } from "./Mixer/SampleBrowser";
+import { Timeline } from "./Mixer/Timeline";
+import { api } from "../api/rest";
 
 interface MixerViewProps {
   project: Project;
@@ -13,60 +15,64 @@ interface MixerViewProps {
  * Mixer view for a single project session.
  *
  * Layout:
- *  ┌─────────────────────────────────────────┐
- *  │  Spectrum visualiser (full width)        │
- *  ├──────────────────────────┬──────────────┤
- *  │  Track strips + Master   │ Sample library│
- *  │  (horizontal scroll)     │ (sidebar)     │
- *  └──────────────────────────┴──────────────┘
+ *  ┌──────────────────────────────────────────────┬──────────────┐
+ *  │  Timeline (beat grid + lanes + clips)        │ Sample       │
+ *  │  (scrollable)                                │ Browser      │
+ *  ├──────────────────────────────────────────────┤ (sidebar)    │
+ *  │  Track strips (vol/pan/EQ) + Master          │              │
+ *  │  (horizontal scroll, fixed ~200px)           │              │
+ *  └──────────────────────────────────────────────┴──────────────┘
  *
  * The WebSocket connection is owned by ProjectWorkspace, not this component.
- * This component only reads from useSocketStore.
  */
 export function MixerView({ project }: MixerViewProps) {
   const { channel, mixerState } = useSocketStore();
+  const [samples, setSamples] = useState<Sample[]>([]);
+
+  // Load samples for timeline waveform rendering
+  useEffect(() => {
+    api.listSamples(1, 100).then((res) => setSamples(res.data));
+  }, []);
 
   const trackIds = mixerState ? Object.keys(mixerState.tracks) : [];
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 88px)" }}>
-      {/* ── Spectrum visualiser ─────────────────────────────────────────── */}
-      <div className="border-b border-gray-800 px-4 py-3">
-        <p className="mb-1 text-[10px] uppercase tracking-widest text-gray-500">
-          Master Spectrum
-        </p>
-        <SpectrumCanvas />
-      </div>
-
       {/* ── Main area ───────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Track strips — horizontal scrollable channel area */}
+        {/* Left: Timeline + Track strips */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="border-b border-gray-800 px-4 py-2">
-            <p className="text-xs text-gray-500">
-              {trackIds.length === 0
-                ? "No tracks — add samples from the library"
-                : `${trackIds.length} track${trackIds.length !== 1 ? "s" : ""}`}
-            </p>
-          </div>
+          {/* Timeline */}
+          <Timeline project={project} samples={samples} />
 
-          <div className="flex flex-1 gap-3 overflow-x-auto p-4">
-            {trackIds.map((id) => (
-              <TrackStrip
-                key={id}
-                trackId={id}
-                initial={mixerState!.tracks[id]}
+          {/* Track strips */}
+          <div className="border-t border-gray-800">
+            <div className="border-b border-gray-800 px-4 py-2">
+              <p className="text-xs text-gray-500">
+                {trackIds.length === 0
+                  ? "No tracks — drag samples from the library onto the timeline"
+                  : `${trackIds.length} track${trackIds.length !== 1 ? "s" : ""}`}
+              </p>
+            </div>
+
+            <div className="flex gap-3 overflow-x-auto p-4" style={{ maxHeight: 220 }}>
+              {trackIds.map((id) => (
+                <TrackStrip
+                  key={id}
+                  trackId={id}
+                  initial={mixerState!.tracks[id]}
+                  channel={channel}
+                />
+              ))}
+
+              {/* Master bus — always last in the strip row */}
+              <MasterBus
+                masterVolume={mixerState?.master_volume ?? 1.0}
+                playing={mixerState?.playing ?? false}
+                bpm={project.bpm}
                 channel={channel}
               />
-            ))}
-
-            {/* Master bus — always last in the strip row */}
-            <MasterBus
-              masterVolume={mixerState?.master_volume ?? 1.0}
-              playing={mixerState?.playing ?? false}
-              bpm={project.bpm}
-              channel={channel}
-            />
+            </div>
           </div>
         </div>
 

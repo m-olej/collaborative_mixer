@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef } from "react";
-import type { CountInNoteValue, LocalSample, RecordedNote } from "../../types/daw";
+import type { CountInNoteValue, LocalSample } from "../../types/daw";
 import { clicksPerBar } from "../../types/daw";
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,8 @@ interface TrackStripProps {
 export function TrackStrip({ trackId, initial, channel }: TrackStripProps) {
   const [volume, setVolume] = useState(initial.volume);
   const [muted, setMuted] = useState(initial.muted);
+  const [solo, setSolo] = useState(initial.solo ?? false);
+  const [pan, setPan] = useState(initial.pan ?? 0);
   const [eq, setEq] = useState<EqSettings>(initial.eq);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -56,6 +58,24 @@ export function TrackStrip({ trackId, initial, channel }: TrackStripProps) {
     setMuted(next);
     sendSlider({ muted: next });
   }, [muted, sendSlider]);
+
+  const handleSolo = useCallback(() => {
+    const next = !solo;
+    setSolo(next);
+    sendSlider({ solo: next });
+  }, [solo, sendSlider]);
+
+  const handlePan = useCallback(
+    (v: number) => {
+      setPan(v);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        sendSlider({ pan: v });
+        debounceRef.current = null;
+      }, DEBOUNCE_MS);
+    },
+    [sendSlider],
+  );
 
   const handleEq = useCallback(
     (band: keyof EqSettings, v: number) => {
@@ -111,6 +131,38 @@ export function TrackStrip({ trackId, initial, channel }: TrackStripProps) {
       >
         {muted ? "MUTED" : "LIVE"}
       </button>
+
+      {/* Solo toggle */}
+      <button
+        type="button"
+        onClick={handleSolo}
+        className={`rounded py-1 text-xs font-bold transition-colors ${
+          solo
+            ? "bg-blue-600 text-white"
+            : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+        }`}
+      >
+        {solo ? "SOLO" : "S"}
+      </button>
+
+      {/* Pan */}
+      <div className="flex flex-col gap-0.5">
+        <div className="flex justify-between text-[10px]">
+          <span className="text-gray-500">Pan</span>
+          <span className="tabular-nums text-gray-400">
+            {pan === 0 ? "C" : pan < 0 ? `L${Math.abs(Math.round(pan * 100))}` : `R${Math.round(pan * 100)}`}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={-1}
+          max={1}
+          step={0.01}
+          value={pan}
+          onChange={(e) => handlePan(parseFloat(e.target.value))}
+          className="h-1 w-full cursor-pointer appearance-none rounded bg-gray-700 accent-indigo-500"
+        />
+      </div>
 
       {/* 3-band EQ */}
       <div className="flex flex-col gap-2">

@@ -1,4 +1,4 @@
-import type { Project, Sample, PaginatedResponse } from "../types/daw";
+import type { Project, Sample, Track, PaginatedResponse } from "../types/daw";
 
 const BASE = "/api";
 
@@ -88,5 +88,53 @@ export const api = {
     // 303 See Other — completed, location header has the result URL
     if (res.status === 202 || res.status === 303) return res.status;
     throw new Error(`Export failed: ${res.status}`);
+  },
+
+  // --- Tracks ---
+
+  listTracks: async (projectId: number): Promise<Track[]> => {
+    const body = await request<{ data: Track[] }>(`/projects/${projectId}/tracks`);
+    return body.data;
+  },
+
+  createTrack: async (
+    projectId: number,
+    data: { name: string; sample_id?: number; s3_key?: string; lane_index: number; position_ms: number },
+  ): Promise<{ track: Track; etag: string }> => {
+    const res = await fetch(`${BASE}/projects/${projectId}/tracks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track: data }),
+    });
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const body = (await res.json()) as { data: Track };
+    const etag = res.headers.get("etag") ?? "";
+    return { track: body.data, etag };
+  },
+
+  updateTrack: async (
+    projectId: number,
+    trackId: number,
+    data: Partial<Pick<Track, "name" | "position_ms" | "lane_index">>,
+    etag: string,
+  ): Promise<{ track: Track; etag: string }> => {
+    const res = await fetch(`${BASE}/projects/${projectId}/tracks/${trackId}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": etag,
+      },
+      body: JSON.stringify({ track: data }),
+    });
+    if (res.status === 412) throw new Error("Conflict: track was modified by another user.");
+    if (res.status === 428) throw new Error("ETag required for update.");
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const body = (await res.json()) as { data: Track };
+    const newEtag = res.headers.get("etag") ?? "";
+    return { track: body.data, etag: newEtag };
+  },
+
+  deleteTrack: async (projectId: number, trackId: number): Promise<void> => {
+    await request<void>(`/projects/${projectId}/tracks/${trackId}`, { method: "DELETE" });
   },
 };

@@ -12,6 +12,7 @@ defmodule Backend.Application do
       Backend.Repo,
       {DNSCluster, query: Application.get_env(:backend, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Backend.PubSub},
+      BackendWeb.Presence,
       {Registry, keys: :unique, name: Backend.SessionRegistry},
       Backend.DawSession.SessionSupervisor,
       # Start to serve requests, typically the last entry

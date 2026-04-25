@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSocketStore } from "../store/useSocketStore";
 import { MixerView } from "./MixerView";
 import { DesignView } from "./Design/DesignView";
+import { AudioVisualization, type AudioVisualizationHandle } from "./AudioVisualization";
+import { CursorOverlay } from "./Collaboration/CursorOverlay";
 import { api } from "../api/rest";
 import type { Project, CountInNoteValue } from "../types/daw";
 
@@ -19,7 +21,10 @@ interface ProjectWorkspaceProps {
  */
 export function ProjectWorkspace({ project: initialProject }: ProjectWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<Tab>("mixer");
-  const { connect, disconnect, connected } = useSocketStore();
+  const { connect, disconnect, connected, setVisualizationCallback, pushCursorMove } = useSocketStore();
+  const vizRef = useRef<AudioVisualizationHandle>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const cursorThrottleRef = useRef<number>(0);
 
   // Local mutable project state for settings editing.
   const [project, setProject] = useState<Project>(initialProject);
@@ -38,9 +43,33 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
   // Single connection shared across tabs — established here so switching
   // tabs does NOT tear down and re-create the WebSocket.
   useEffect(() => {
+    // Wire visualization callback before connecting.
+    setVisualizationCallback((fft, pcm) => {
+      vizRef.current?.updateVisualization(fft, pcm);
+    });
     connect(project.id);
-    return () => disconnect();
-  }, [project.id, connect, disconnect]);
+    return () => {
+      disconnect();
+      setVisualizationCallback(null);
+    };
+  }, [project.id, connect, disconnect, setVisualizationCallback]);
+
+  // Throttled cursor tracking.
+  useEffect(() => {
+    const el = workspaceRef.current;
+    if (!el) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const now = Date.now();
+      if (now - cursorThrottleRef.current < 50) return;
+      cursorThrottleRef.current = now;
+      const rect = el.getBoundingClientRect();
+      pushCursorMove(e.clientX - rect.left, e.clientY - rect.top);
+    };
+
+    el.addEventListener("mousemove", handleMouseMove);
+    return () => el.removeEventListener("mousemove", handleMouseMove);
+  }, [pushCursorMove]);
 
   // ── Settings save ─────────────────────────────────────────────────────────
   const saveSettings = useCallback(
@@ -66,7 +95,10 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={workspaceRef} className="relative flex min-h-0 flex-1 flex-col">
+      {/* ── Cursor overlay ──────────────────────────────────────────── */}
+      <CursorOverlay />
+
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
       <div className="flex items-end gap-0 border-b border-gray-800 px-4">
         <TabButton active={activeTab === "mixer"} onClick={() => setActiveTab("mixer")}>
@@ -102,6 +134,9 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
           onSave={saveSettings}
         />
       )}
+
+      {/* ── Audio Visualization (always visible) ─────────────────────────── */}
+      <AudioVisualization ref={vizRef} />
 
       {/* ── Active view ──────────────────────────────────────────────────── */}
       {activeTab === "mixer" ? (

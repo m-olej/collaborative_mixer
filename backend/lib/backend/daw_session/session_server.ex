@@ -57,6 +57,11 @@ defmodule Backend.DawSession.SessionServer do
     GenServer.call(via(project_id), :get_synth_params)
   end
 
+  @doc "Get the raw PCM binary from the last bar render (for waveform peaks)."
+  def get_last_bar_render(project_id) do
+    GenServer.call(via(project_id), :get_last_bar_render)
+  end
+
   @doc """
   Render a polyphonic bar from a list of note events.
 
@@ -138,6 +143,19 @@ defmodule Backend.DawSession.SessionServer do
   @impl true
   def handle_call(:get_synth_params, _from, state) do
     {:reply, state.synth_params, state}
+  end
+
+  @impl true
+  def handle_call(:get_last_bar_render, _from, state) do
+    case state.last_bar_render do
+      {:ok, binary} ->
+        # Extract raw PCM from the wire frame (skip 4-byte header + 512-byte FFT)
+        pcm_binary = binary_part(binary, 516, byte_size(binary) - 516)
+        {:reply, {:ok, pcm_binary}, state}
+
+      _ ->
+        {:reply, {:error, :no_render}, state}
+    end
   end
 
   @impl true
@@ -314,6 +332,24 @@ defmodule Backend.DawSession.SessionServer do
     put_in(state, [:tracks, track_id], track_state)
   end
 
+  defp apply_slider_update(state, %{"track_id" => track_id, "solo" => solo}) do
+    track_state =
+      Map.get(state.tracks, track_id, default_track_state())
+      |> Map.put(:solo, solo)
+
+    put_in(state, [:tracks, track_id], track_state)
+  end
+
+  defp apply_slider_update(state, %{"track_id" => track_id, "pan" => pan}) do
+    clamped = max(-1.0, min(1.0, pan / 1.0))
+
+    track_state =
+      Map.get(state.tracks, track_id, default_track_state())
+      |> Map.put(:pan, clamped)
+
+    put_in(state, [:tracks, track_id], track_state)
+  end
+
   # Only the three known eq band atoms are permitted; the `when` guard prevents
   # unknown strings from reaching `String.to_existing_atom/1`.
   defp apply_slider_update(state, %{
@@ -331,7 +367,7 @@ defmodule Backend.DawSession.SessionServer do
   defp apply_slider_update(state, _unknown), do: state
 
   defp default_track_state do
-    %{volume: 1.0, muted: false, eq: %{low: 0.0, mid: 0.0, high: 0.0}}
+    %{volume: 1.0, muted: false, solo: false, pan: 0.0, eq: %{low: 0.0, mid: 0.0, high: 0.0}}
   end
 
   defp default_synth_params do
