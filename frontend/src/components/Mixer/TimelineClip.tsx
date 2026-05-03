@@ -34,6 +34,7 @@ export function TimelineClip({
   const batchMoveSelectedTracks = useTimelineStore((s) => s.batchMoveSelectedTracks);
   const draggingByUser = useTimelineStore((s) => s.draggingByUser);
   const channel = useSocketStore((s) => s.channel);
+  const pushSelectionUpdate = useSocketStore((s) => s.pushSelectionUpdate);
   const { localSelection, setLocalSelection, remoteUsers } = useCollabStore();
   const waveformRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -95,33 +96,13 @@ export function TimelineClip({
     [track.id, track.lane_index, selectedTrackIds, selectTrack, channel],
   );
 
-  // Drag end — calculate new position
+  // Drag end — clean up visual state, move is handled by Timeline.handleDrop
   const handleDragEnd = useCallback(
-    (e: React.DragEvent) => {
+    () => {
       setIsDragging(false);
       channel?.push("tracks_drag_end", {});
-
-      if (e.dataTransfer.dropEffect === "none") return;
-
-      const parentRect = (e.currentTarget as HTMLElement)
-        .closest("[data-lane]")
-        ?.getBoundingClientRect();
-      if (!parentRect) return;
-
-      const dropX = e.clientX - parentRect.left;
-      const rawMs = dropX / pxPerMs;
-      const positionMs = snapPositionMs(rawMs);
-      const deltaMs = positionMs - track.position_ms;
-
-      if (selectedTrackIds.size > 1 && selectedTrackIds.has(track.id)) {
-        // Batch move all selected tracks.
-        batchMoveSelectedTracks(projectId, deltaMs, 0);
-      } else {
-        // Single track move.
-        moveTrack(projectId, track.id, { position_ms: Math.round(positionMs) });
-      }
     },
-    [pxPerMs, snapPositionMs, moveTrack, batchMoveSelectedTracks, projectId, track.id, track.position_ms, selectedTrackIds, channel],
+    [channel],
   );
 
   // Context menu: delete
@@ -144,12 +125,12 @@ export function TimelineClip({
         toggleTrackSelection(track.id);
       } else {
         selectTrack(track.id);
-        setLocalSelection(
-          isSelected ? null : { type: "timeline_clip", id: track.id },
-        );
+        const sel = isSelected ? null : { type: "timeline_clip" as const, id: track.id };
+        setLocalSelection(sel);
+        pushSelectionUpdate(sel);
       }
     },
-    [isSelected, setLocalSelection, selectTrack, toggleTrackSelection, track.id],
+    [isSelected, setLocalSelection, pushSelectionUpdate, selectTrack, toggleTrackSelection, track.id],
   );
 
   // Check if any remote user has this clip selected

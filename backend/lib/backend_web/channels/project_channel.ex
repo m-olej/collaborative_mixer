@@ -343,12 +343,13 @@ defmodule BackendWeb.ProjectChannel do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def handle_in("cursor_move", %{"x" => x, "y" => y}, socket) do
+  def handle_in("cursor_move", %{"x" => x, "y" => y} = payload, socket) do
     broadcast_from!(socket, "cursor_move", %{
       user: socket.assigns.username,
       color: socket.assigns.user_color,
       x: x,
-      y: y
+      y: y,
+      view: Map.get(payload, "view")
     })
 
     {:noreply, socket}
@@ -380,6 +381,17 @@ defmodule BackendWeb.ProjectChannel do
       user: socket.assigns.username,
       color: socket.assigns.user_color,
       selection: payload
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("lane_update", %{"lane_configs" => configs, "lane_order" => order}, socket) do
+    broadcast_from!(socket, "lane_update", %{
+      user: socket.assigns.username,
+      lane_configs: configs,
+      lane_order: order
     })
 
     {:noreply, socket}

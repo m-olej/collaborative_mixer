@@ -36,6 +36,14 @@ export function useAudioWorklet() {
     nodeRef.current?.port.postMessage({ type: "mix", pcm });
   }, []);
 
+  /**
+   * Per-voice PCM feed. Each voice (identified by MIDI note) gets its chunks
+   * appended sequentially, while different voices overlap additively.
+   */
+  const voicePcm = useCallback((midi: number, pcm: Float32Array) => {
+    nodeRef.current?.port.postMessage({ type: "voice", midi, pcm });
+  }, []);
+
   /** Tear down the audio context. */
   const destroy = useCallback(() => {
     nodeRef.current?.disconnect();
@@ -47,5 +55,5 @@ export function useAudioWorklet() {
   /** Get the underlying AudioContext (for creating AudioBufferSourceNodes). */
   const getContext = useCallback(() => ctxRef.current, []);
 
-  return { init, feedPcm, mixPcm, getContext, destroy };
+  return { init, feedPcm, mixPcm, voicePcm, getContext, destroy };
 }

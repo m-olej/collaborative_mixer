@@ -6,7 +6,13 @@ defmodule BackendWeb.TrackController do
 
   def index(conn, %{"project_id" => project_id}) do
     tracks = Projects.list_tracks(project_id)
-    json(conn, %{data: Enum.map(tracks, &track_json/1)})
+
+    etags =
+      Map.new(tracks, fn t ->
+        {to_string(t.id), Projects.track_etag(t)}
+      end)
+
+    json(conn, %{data: Enum.map(tracks, &track_json/1), etags: etags})
   end
 
   def show(conn, %{"id" => id}) do

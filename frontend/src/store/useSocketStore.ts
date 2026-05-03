@@ -18,11 +18,12 @@ interface SocketState {
   connect: (projectId: number) => void;
   disconnect: () => void;
   setVisualizationCallback: (cb: VisualizationCallback | null) => void;
-  pushCursorMove: (x: number, y: number) => void;
+  pushCursorMove: (x: number, y: number, view?: string) => void;
   pushSelectionUpdate: (selection: CollabSelection | null) => void;
   pushStartPlayback: (cursorMs: number) => void;
   pushStopPlayback: () => void;
   pushSeek: (cursorMs: number) => void;
+  pushLaneUpdate: (configs: Record<number, { name: string; color: string }>, order: number[]) => void;
 }
 
 export const useSocketStore = create<SocketState>((set, get) => ({
@@ -148,8 +149,8 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     });
 
     // --- Cursor and selection handlers ---
-    channel.on("cursor_move", (payload: { user: string; color: string; x: number; y: number }) => {
-      useCollabStore.getState().updateRemoteCursor(payload.user, payload.color, payload.x, payload.y);
+    channel.on("cursor_move", (payload: { user: string; color: string; x: number; y: number; view?: string }) => {
+      useCollabStore.getState().updateRemoteCursor(payload.user, payload.color, payload.x, payload.y, payload.view);
     });
 
     channel.on("selection_update", (payload: { user: string; color: string; selection: CollabSelection | null }) => {
@@ -185,6 +186,15 @@ export const useSocketStore = create<SocketState>((set, get) => ({
       );
     });
 
+    // --- Lane config sync ---
+    channel.on("lane_update", (payload: { lane_configs: Record<string, { name: string; color: string }>; lane_order: number[] }) => {
+      const configs: Record<number, { name: string; color: string }> = {};
+      for (const [k, v] of Object.entries(payload.lane_configs)) {
+        configs[Number(k)] = v;
+      }
+      useTimelineStore.getState().handleRemoteLaneUpdate(configs, payload.lane_order);
+    });
+
     // Initialize design views from join state once it arrives.
     const unsubMixer = useSocketStore.subscribe((state) => {
       if (state.mixerState?.design_views) {
@@ -205,8 +215,8 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     set({ socket: null, channel: null, connected: false, mixerState: null });
   },
 
-  pushCursorMove: (x, y) => {
-    get().channel?.push("cursor_move", { x, y });
+  pushCursorMove: (x, y, view) => {
+    get().channel?.push("cursor_move", { x, y, view });
   },
 
   pushSelectionUpdate: (selection) => {
@@ -233,5 +243,9 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     if (!ch) return;
     useTimelineStore.getState().setPlayheadMs(cursorMs);
     ch.push("seek", { cursor_ms: cursorMs });
+  },
+
+  pushLaneUpdate: (configs, order) => {
+    get().channel?.push("lane_update", { lane_configs: configs, lane_order: order });
   },
 }));

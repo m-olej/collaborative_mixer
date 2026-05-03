@@ -1,13 +1,20 @@
 import { useCollabStore } from "../../store/useCollabStore";
 
+interface CursorOverlayProps {
+  currentView?: string;
+}
+
 /**
  * Renders colored cursor dots with usernames for all remote collaborators.
  * Positioned as an absolute overlay on top of the ProjectWorkspace.
+ * When currentView is provided, only shows cursors from users on the same view.
  */
-export function CursorOverlay() {
+export function CursorOverlay({ currentView }: CursorOverlayProps) {
   const remoteUsers = useCollabStore((s) => s.remoteUsers);
 
-  const users = Object.values(remoteUsers).filter((u) => u.cursor !== null);
+  const users = Object.values(remoteUsers).filter(
+    (u) => u.cursor !== null && (!currentView || u.activeView === currentView),
+  );
 
   if (users.length === 0) return null;
 

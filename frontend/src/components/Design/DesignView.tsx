@@ -46,6 +46,8 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
   const setActiveView = useDesignViewStore((s) => s.setActiveView);
   const ensureView = useDesignViewStore((s) => s.ensureView);
   const designViews = useDesignViewStore((s) => s.designViews);
+  const createView = useDesignViewStore((s) => s.createView);
+  const removeView = useDesignViewStore((s) => s.removeView);
 
   // Ensure own view exists and is active on mount.
   useEffect(() => {
@@ -54,7 +56,7 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
   }, [myViewId, activeViewId, ensureView, setActiveView]);
 
   const currentViewId = activeViewId || myViewId;
-  const isOwnView = currentViewId === myViewId;
+  const isOwnView = currentViewId === myViewId || currentViewId.startsWith(`design:${localUsername}:`);
 
   // ── Audio sync toggle ─────────────────────────────────────────────────────
   const syncEnabled = useDesignViewStore((s) => s.syncByView[myViewId] ?? false);
@@ -65,6 +67,22 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
     setSync(myViewId, next);
     channel?.push("set_sync", { view_id: myViewId, enabled: next });
   }, [syncEnabled, setSync, myViewId, channel]);
+
+  // ── Create new design view ────────────────────────────────────────────────
+  const handleCreateView = useCallback(() => {
+    const name = prompt("Name for the new design view:");
+    if (!name?.trim()) return;
+    const viewId = `design:${localUsername}:${name.trim()}`;
+    createView(viewId);
+  }, [localUsername, createView]);
+
+  const handleRemoveView = useCallback(
+    (viewId: string) => {
+      if (!confirm("Delete this design view?")) return;
+      removeView(viewId);
+    },
+    [removeView],
+  );
 
   // ── Local sample state (lifted from SampleRecorder for PianoRoll access) ──
   const [localSample, setLocalSample] = useState<LocalSample | null>(null);
@@ -131,10 +149,28 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
           isOwn
           onClick={() => setActiveView(myViewId)}
         />
+        {/* Custom views created by this user */}
         {Object.keys(designViews)
-          .filter((vid) => vid !== myViewId && vid.startsWith("design:"))
+          .filter((vid) => vid.startsWith(`design:${localUsername}:`))
           .map((vid) => {
-            const uname = vid.replace("design:", "");
+            const name = vid.replace(`design:${localUsername}:`, "");
+            return (
+              <DesignTab
+                key={vid}
+                label={name}
+                viewId={vid}
+                active={currentViewId === vid}
+                isOwn
+                onClick={() => setActiveView(vid)}
+                onDelete={() => handleRemoveView(vid)}
+              />
+            );
+          })}
+        {/* Remote user views */}
+        {Object.keys(designViews)
+          .filter((vid) => vid !== myViewId && vid.startsWith("design:") && !vid.startsWith(`design:${localUsername}:`))
+          .map((vid) => {
+            const uname = vid.replace("design:", "").split(":")[0];
             const remote = remoteUsers[uname];
             return (
               <DesignTab
@@ -147,6 +183,15 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
               />
             );
           })}
+        {/* New view button */}
+        <button
+          type="button"
+          onClick={handleCreateView}
+          className="flex items-center justify-center rounded px-2 py-1 text-sm text-gray-500 hover:bg-gray-800 hover:text-indigo-400 transition-colors"
+          title="Create new design view"
+        >
+          +
+        </button>
 
         {/* Sync toggle */}
         <div className="ml-auto flex items-center gap-2">
@@ -301,6 +346,7 @@ function DesignTab({
   isOwn,
   color,
   onClick,
+  onDelete,
 }: {
   label: string;
   viewId: string;
@@ -308,24 +354,40 @@ function DesignTab({
   isOwn?: boolean;
   color?: string;
   onClick: () => void;
+  onDelete?: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1.5 rounded px-3 py-1 text-xs font-medium transition-colors ${
-        active
-          ? "bg-indigo-600 text-white"
-          : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-      }`}
-    >
-      {!isOwn && (
-        <span
-          className="inline-block h-2 w-2 rounded-full"
-          style={{ backgroundColor: color ?? "#888" }}
-        />
+    <div className="group relative flex items-center">
+      <button
+        type="button"
+        onClick={onClick}
+        className={`flex items-center gap-1.5 rounded px-3 py-1 text-xs font-medium transition-colors ${
+          active
+            ? "bg-indigo-600 text-white"
+            : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+        }`}
+      >
+        {!isOwn && (
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ backgroundColor: color ?? "#888" }}
+          />
+        )}
+        {isOwn ? (onDelete ? label : "My Design") : label}
+      </button>
+      {onDelete && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="ml-0.5 rounded px-1 text-[10px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Delete view"
+        >
+          ✕
+        </button>
       )}
-      {isOwn ? "My Design" : label}
-    </button>
+    </div>
   )
 }

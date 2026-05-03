@@ -69,12 +69,12 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
       if (now - cursorThrottleRef.current < 50) return;
       cursorThrottleRef.current = now;
       const rect = el.getBoundingClientRect();
-      pushCursorMove(e.clientX - rect.left, e.clientY - rect.top);
+      pushCursorMove(e.clientX - rect.left, e.clientY - rect.top, activeTab);
     };
 
     el.addEventListener("mousemove", handleMouseMove);
     return () => el.removeEventListener("mousemove", handleMouseMove);
-  }, [pushCursorMove]);
+  }, [pushCursorMove, activeTab]);
 
   // ── Settings save ─────────────────────────────────────────────────────────
   const saveSettings = useCallback(
@@ -102,7 +102,7 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
   return (
     <div ref={workspaceRef} className="relative flex min-h-0 flex-1 flex-col">
       {/* ── Cursor overlay ──────────────────────────────────────────── */}
-      <CursorOverlay />
+      <CursorOverlay currentView={activeTab} />
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
       <div className="flex items-end gap-0 border-b border-gray-800 px-4">

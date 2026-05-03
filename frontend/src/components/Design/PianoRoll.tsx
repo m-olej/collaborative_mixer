@@ -206,19 +206,6 @@ export function PianoRoll({
           style={{ imageRendering: "pixelated" }}
         />
       </div>
-
-      {/* ── Playback button ──────────────────────────────────────────── */}
-      {localSample && (
-        <button
-          type="button"
-          onClick={handlePlay}
-          className="self-start rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-medium
-                     text-white hover:bg-indigo-500"
-        >
-          ▶ Play Sample
-        </button>
-      )}
-
       {!localSample && (
         <p className="text-xs text-gray-600">
           Record a bar to see the note visualization here.

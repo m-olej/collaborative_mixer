@@ -92,9 +92,9 @@ export const api = {
 
   // --- Tracks ---
 
-  listTracks: async (projectId: number): Promise<Track[]> => {
-    const body = await request<{ data: Track[] }>(`/projects/${projectId}/tracks`);
-    return body.data;
+  listTracks: async (projectId: number): Promise<{ tracks: Track[]; etags: Record<string, string> }> => {
+    const body = await request<{ data: Track[]; etags: Record<string, string> }>(`/projects/${projectId}/tracks`);
+    return { tracks: body.data, etags: body.etags ?? {} };
   },
 
   createTrack: async (

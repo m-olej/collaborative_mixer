@@ -287,6 +287,7 @@ export interface CollabUser {
 export interface RemoteUser extends CollabUser {
   cursor: { x: number; y: number } | null;
   selection: CollabSelection | null;
+  activeView?: string;
 }
 
 export type CollabSelection =

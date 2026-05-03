@@ -71,6 +71,14 @@ class CloudDawProcessor extends AudioWorkletProcessor {
     /** Number of valid, unread samples currently in the ring. */
     this._available = 0;
 
+    /**
+     * Per-voice write cursors. Maps MIDI note → absolute write position for
+     * that voice. Burst + pace chunks from the same voice are appended
+     * sequentially, while different voices overlap additively.
+     * @type {Map<number, number>}
+     */
+    this._voices = new Map();
+
     // ── Message handler ────────────────────────────────────────────────────
     // Called on the audio thread when React posts a new PCM chunk.
     // This handler IS allowed to touch `this._ring` without a lock because
@@ -83,10 +91,15 @@ class CloudDawProcessor extends AudioWorkletProcessor {
       //   Float32Array         → append (legacy, sequential playback)
       //   { type: "mix", pcm } → additive mix at current writePos
       //                          (for polyphonic note preview overlay)
+      //   { type: "voice", midi, pcm } → per-voice tracked mix
+      //                          (burst + pace chunks appended per voice,
+      //                           overlapping with other voices)
       if (data instanceof Float32Array) {
         this._appendToRing(data);
+      } else if (data && data.type === "voice" && typeof data.midi === "number" && data.pcm instanceof Float32Array) {
+        this._voiceMix(data.midi, data.pcm);
       } else if (data && data.type === "mix" && data.pcm instanceof Float32Array) {
-        this._mixIntoRing(data.pcm);
+        this._voiceMix(0, data.pcm);
       }
     };
   }
@@ -125,43 +138,70 @@ class CloudDawProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Additively mix PCM samples into the ring buffer starting at the
-   * current read position.  Used for polyphonic note preview: multiple
-   * overlapping notes are summed together in-place so they play simultaneously.
+   * Per-voice additive mix into the ring buffer.
    *
-   * Unlike _appendToRing, this does NOT advance writePos or increase
-   * _available beyond the mix region.  The mix region extends from readPos
-   * to readPos + pcm.length, expanding _available if it reaches further than
-   * the current writePos.
+   * Each voice has its own write cursor (stored in `_voices`).  The first
+   * chunk for a voice (burst) starts writing at the current `_writePos`.
+   * Subsequent chunks (pace) continue from where the previous chunk ended.
+   * Different voices overlap additively so polyphony works correctly.
    *
-   * @param {Float32Array} pcm
+   * When a voice's cursor falls behind the read pointer (already consumed),
+   * it is reset so the next chunk starts from the current write frontier.
+   *
+   * @param {number} midi MIDI note number (voice identifier)
+   * @param {Float32Array} pcm Samples to mix in
    */
-  _mixIntoRing(pcm) {
+  _voiceMix(midi, pcm) {
     const count = pcm.length;
     if (count === 0) return;
 
-    // Mix starting at the current readPos (i.e. "now").
-    // If there are already samples ahead in the buffer, add on top of them.
-    // If the mix region extends beyond current _available, pad with the new
-    // samples (no existing data to add to).
-    for (let i = 0; i < count; i++) {
-      const pos = (this._readPos + i) % CAPACITY;
+    // Determine this voice's write start position.
+    let voicePos = this._voices.get(midi);
 
-      if (i < this._available) {
-        // Additive mix: sum with existing buffered audio.
+    // If the voice has no cursor, or its cursor is behind the read pointer
+    // (its audio was already consumed), start from the current write frontier.
+    if (voicePos === undefined || !this._isAheadOfRead(voicePos)) {
+      voicePos = this._writePos;
+    }
+
+    // Mix the PCM samples into the ring at voicePos.
+    for (let i = 0; i < count; i++) {
+      const pos = (voicePos + i) % CAPACITY;
+
+      // Is this position within the already-buffered region?
+      const distFromRead = (pos - this._readPos + CAPACITY) % CAPACITY;
+      if (distFromRead < this._available) {
+        // Additive mix with existing audio (other voices already wrote here).
         this._ring[pos] += pcm[i];
       } else {
-        // Beyond current buffer content: just write.
+        // New territory: just write (no existing data).
         this._ring[pos] = pcm[i];
       }
     }
 
-    // Expand available if the mix region reaches further than current content.
-    if (count > this._available) {
-      // Update writePos to the end of the mix region.
-      this._writePos = (this._readPos + count) % CAPACITY;
-      this._available = count;
+    // Advance this voice's cursor.
+    const newVoicePos = (voicePos + count) % CAPACITY;
+    this._voices.set(midi, newVoicePos);
+
+    // Expand the global buffer extent if this voice wrote past _writePos.
+    const voiceEnd = (voicePos + count - this._readPos + CAPACITY) % CAPACITY;
+    const currentExtent = this._available;
+    if (voiceEnd > currentExtent) {
+      this._available = voiceEnd;
+      this._writePos = (this._readPos + voiceEnd) % CAPACITY;
     }
+  }
+
+  /**
+   * Check if a ring buffer position is ahead of (or at) the read pointer.
+   * "Ahead" means it hasn't been consumed yet.
+   * @param {number} pos
+   * @returns {boolean}
+   */
+  _isAheadOfRead(pos) {
+    if (this._available === 0) return false;
+    const dist = (pos - this._readPos + CAPACITY) % CAPACITY;
+    return dist > 0 && dist <= this._available;
   }
 
   /**
@@ -197,10 +237,13 @@ class CloudDawProcessor extends AudioWorkletProcessor {
 
     // Copy segment A from ring into the output channel.
     channel.set(this._ring.subarray(this._readPos, this._readPos + segA), 0);
+    // Zero out consumed region to prevent stale data in additive mix.
+    this._ring.fill(0, this._readPos, this._readPos + segA);
 
     // Copy segment B (wrapped portion) if present.
     if (segB > 0) {
       channel.set(this._ring.subarray(0, segB), segA);
+      this._ring.fill(0, 0, segB);
     }
 
     this._readPos = (this._readPos + toRead) % CAPACITY;

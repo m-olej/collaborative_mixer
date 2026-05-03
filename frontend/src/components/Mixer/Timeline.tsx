@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Project, Track, Sample, SnapResolution } from "../../types/daw";
 import { parseTimeSignature } from "../../types/daw";
 import { useTimelineStore } from "../../store/useTimelineStore";
+import type { LaneConfig } from "../../store/useTimelineStore";
 import { useSocketStore } from "../../store/useSocketStore";
 import { useCollabStore } from "../../store/useCollabStore";
 import { TimelineLane } from "./TimelineLane";
@@ -14,6 +15,11 @@ interface TimelineProps {
 const LANE_HEIGHT = 72;
 const GUTTER_WIDTH = 120;
 const RULER_HEIGHT = 28;
+const DEFAULT_LANE_COLOR = "#374151";
+const LANE_COLORS = [
+  "#374151", "#991b1b", "#92400e", "#065f46", "#1e40af",
+  "#5b21b6", "#9d174d", "#78350f", "#115e59", "#4338ca",
+];
 
 /**
  * Main timeline view. Renders a beat grid with lanes for placing sample clips.
@@ -29,22 +35,43 @@ export function Timeline({ project, samples }: TimelineProps) {
     setSnap,
     fetchTracks,
     placeTrack,
+    moveTrack,
+    batchMoveSelectedTracks,
     playheadMs,
     playing,
     userCursors,
+    laneConfigs,
+    laneOrder,
+    addLane,
+    removeLane,
+    renameLane,
+    setLaneColor,
+    setLaneOrder,
+    syncLanesFromTracks,
   } = useTimelineStore();
 
-  const { pushStartPlayback, pushStopPlayback, pushSeek } = useSocketStore();
+  const { pushStartPlayback, pushStopPlayback, pushSeek, pushLaneUpdate } = useSocketStore();
   const localColor = useCollabStore((s) => s.localUser.color);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
   const animFrameRef = useRef<number>(0);
   const playStartRef = useRef<{ wallMs: number; cursorMs: number }>({ wallMs: 0, cursorMs: 0 });
+  const laneInitRef = useRef(false);
 
   useEffect(() => {
-    fetchTracks(project.id);
-  }, [project.id, fetchTracks]);
+    fetchTracks(project.id).then(() => {
+      syncLanesFromTracks();
+      // Mark init done after first lane sync so we don't broadcast the initial state.
+      laneInitRef.current = true;
+    });
+  }, [project.id, fetchTracks, syncLanesFromTracks]);
+
+  // Broadcast lane changes to other users after local mutations.
+  useEffect(() => {
+    if (!laneInitRef.current) return;
+    pushLaneUpdate(laneConfigs, laneOrder);
+  }, [laneConfigs, laneOrder, pushLaneUpdate]);
 
   const [beatsPerBar] = parseTimeSignature(project.time_signature);
   const msPerBeat = 60000 / project.bpm;
@@ -115,8 +142,47 @@ export function Timeline({ project, samples }: TimelineProps) {
     existing.push(track);
     laneMap.set(track.lane_index, existing);
   }
-  const maxLane = Math.max(0, ...laneMap.keys());
-  const laneIndices = Array.from({ length: maxLane + 2 }, (_, i) => i); // +1 empty lane
+
+  // Lane drag-reorder state
+  const [dragLaneFrom, setDragLaneFrom] = useState<number | null>(null);
+  const [dragLaneOver, setDragLaneOver] = useState<number | null>(null);
+
+  const handleLaneDragStart = useCallback((laneIndex: number) => {
+    setDragLaneFrom(laneIndex);
+  }, []);
+
+  const handleLaneDragOver = useCallback((laneIndex: number) => {
+    setDragLaneOver(laneIndex);
+  }, []);
+
+  const handleLaneDragEnd = useCallback(() => {
+    if (dragLaneFrom !== null && dragLaneOver !== null && dragLaneFrom !== dragLaneOver) {
+      const newOrder = [...laneOrder];
+      const fromIdx = newOrder.indexOf(dragLaneFrom);
+      const toIdx = newOrder.indexOf(dragLaneOver);
+      if (fromIdx !== -1 && toIdx !== -1) {
+        newOrder.splice(fromIdx, 1);
+        newOrder.splice(toIdx, 0, dragLaneFrom);
+        setLaneOrder(newOrder);
+      }
+    }
+    setDragLaneFrom(null);
+    setDragLaneOver(null);
+  }, [dragLaneFrom, dragLaneOver, laneOrder, setLaneOrder]);
+
+  // Delete lane handler
+  const handleDeleteLane = useCallback(
+    (laneIndex: number) => {
+      const laneTracks = laneMap.get(laneIndex) ?? [];
+      if (laneTracks.length > 0) {
+        if (!confirm(`Lane "${laneConfigs[laneIndex]?.name ?? `Lane ${laneIndex + 1}`}" contains ${laneTracks.length} clip(s). Delete lane and all its clips?`)) {
+          return;
+        }
+      }
+      removeLane(laneIndex, project.id, true);
+    },
+    [laneMap, laneConfigs, removeLane, project.id],
+  );
 
   // Snap helper
   const snapPositionMs = useCallback(
@@ -144,10 +210,44 @@ export function Timeline({ project, samples }: TimelineProps) {
     [snapEnabled, snapResolution, msPerBeat, beatsPerBar],
   );
 
-  // Handle drop on empty lane area (new track placement from sample browser)
+  // Handle drop on lane area (new track from sample browser OR clip move)
   const handleDrop = useCallback(
     (e: React.DragEvent, laneIndex: number) => {
       e.preventDefault();
+
+      // ── Handle clip move ────────────────────────────────────────────────
+      const clipData = e.dataTransfer.getData("application/x-clip-move");
+      if (clipData) {
+        try {
+          const { trackId, laneIndex: origLane, selectedIds } = JSON.parse(clipData) as {
+            trackId: number;
+            laneIndex: number;
+            selectedIds: number[];
+          };
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
+          const dropX = e.clientX - rect.left + scrollLeft;
+          const rawMs = dropX / pxPerMs;
+          const positionMs = snapPositionMs(rawMs);
+
+          if (selectedIds.length > 1) {
+            const origTrack = tracks.find((t) => t.id === trackId);
+            const deltaMs = positionMs - (origTrack?.position_ms ?? 0);
+            const deltaLane = laneIndex - origLane;
+            batchMoveSelectedTracks(project.id, deltaMs, deltaLane, selectedIds);
+          } else {
+            moveTrack(project.id, trackId, {
+              position_ms: Math.round(positionMs),
+              lane_index: laneIndex,
+            });
+          }
+        } catch {
+          /* invalid data */
+        }
+        return;
+      }
+
+      // ── Handle sample from browser ──────────────────────────────────────
       const raw = e.dataTransfer.getData("application/json");
       if (!raw) return;
 
@@ -165,9 +265,11 @@ export function Timeline({ project, samples }: TimelineProps) {
           lane_index: laneIndex,
           position_ms: Math.round(positionMs),
         });
-      } catch { /* invalid data */ }
+      } catch {
+        /* invalid data */
+      }
     },
-    [pxPerMs, snapPositionMs, placeTrack, project.id],
+    [pxPerMs, snapPositionMs, placeTrack, moveTrack, batchMoveSelectedTracks, project.id, tracks],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -229,15 +331,30 @@ export function Timeline({ project, samples }: TimelineProps) {
           >
             Timeline
           </div>
-          {laneIndices.map((i) => (
-            <div
-              key={i}
-              className="flex items-center border-b border-r border-gray-800 bg-gray-900 px-2 text-xs text-gray-400"
-              style={{ height: LANE_HEIGHT }}
-            >
-              Lane {i + 1}
-            </div>
+          {laneOrder.map((laneIdx) => (
+            <LaneGutterItem
+              key={laneIdx}
+              laneIndex={laneIdx}
+              config={laneConfigs[laneIdx] ?? { name: `Lane ${laneIdx + 1}`, color: DEFAULT_LANE_COLOR }}
+              height={LANE_HEIGHT}
+              onRename={(name) => renameLane(laneIdx, name)}
+              onColorChange={(color) => setLaneColor(laneIdx, color)}
+              onDelete={() => handleDeleteLane(laneIdx)}
+              onDragStart={() => handleLaneDragStart(laneIdx)}
+              onDragOver={() => handleLaneDragOver(laneIdx)}
+              onDragEnd={handleLaneDragEnd}
+              isDragOver={dragLaneOver === laneIdx && dragLaneFrom !== laneIdx}
+            />
           ))}
+          {/* Add lane button */}
+          <div
+            className="flex items-center justify-center border-b border-r border-gray-800 bg-gray-900 cursor-pointer hover:bg-gray-800 transition-colors"
+            style={{ height: LANE_HEIGHT }}
+            onClick={() => addLane()}
+            title="Add lane"
+          >
+            <span className="text-lg text-gray-500 hover:text-indigo-400">+</span>
+          </div>
         </div>
 
         {/* Scrollable grid + lanes */}
@@ -254,11 +371,11 @@ export function Timeline({ project, samples }: TimelineProps) {
             />
 
             {/* Lanes */}
-            {laneIndices.map((i) => (
+            {laneOrder.map((laneIdx) => (
               <TimelineLane
-                key={i}
-                laneIndex={i}
-                tracks={laneMap.get(i) ?? []}
+                key={laneIdx}
+                laneIndex={laneIdx}
+                tracks={laneMap.get(laneIdx) ?? []}
                 samples={samples}
                 height={LANE_HEIGHT}
                 pxPerMs={pxPerMs}
@@ -267,10 +384,19 @@ export function Timeline({ project, samples }: TimelineProps) {
                 totalWidth={totalWidth}
                 projectId={project.id}
                 snapPositionMs={snapPositionMs}
-                onDrop={(e) => handleDrop(e, i)}
-                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, laneIdx)}
               />
             ))}
+            {/* Empty add-lane drop zone */}
+            <div
+              className="border-b border-gray-800"
+              style={{ height: LANE_HEIGHT, width: totalWidth }}
+              onDrop={(e) => {
+                const newIdx = addLane();
+                handleDrop(e, newIdx);
+              }}
+              onDragOver={handleDragOver}
+            />
 
             {/* Playhead cursor (local) */}
             <div
@@ -311,6 +437,145 @@ export function Timeline({ project, samples }: TimelineProps) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LaneGutterItem — editable lane label with color, rename, delete, drag
+// ---------------------------------------------------------------------------
+
+function LaneGutterItem({
+  laneIndex,
+  config,
+  height,
+  onRename,
+  onColorChange,
+  onDelete,
+  onDragStart,
+  onDragOver,
+  onDragEnd,
+  isDragOver,
+}: {
+  laneIndex: number;
+  config: LaneConfig;
+  height: number;
+  onRename: (name: string) => void;
+  onColorChange: (color: string) => void;
+  onDelete: () => void;
+  onDragStart: () => void;
+  onDragOver: () => void;
+  onDragEnd: () => void;
+  isDragOver: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(config.name);
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const commitRename = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== config.name) {
+      onRename(trimmed);
+    } else {
+      setEditValue(config.name);
+    }
+    setEditing(false);
+  };
+
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/x-lane-reorder", String(laneIndex));
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart();
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        onDragOver();
+      }}
+      onDragEnd={onDragEnd}
+      className={`group flex items-center gap-1 border-b border-r border-gray-800 bg-gray-900 px-1.5 text-xs text-gray-400 ${
+        isDragOver ? "bg-indigo-900/30" : ""
+      }`}
+      style={{ height }}
+    >
+      {/* Drag handle */}
+      <span className="cursor-grab text-[10px] text-gray-600 opacity-0 group-hover:opacity-100" title="Drag to reorder">
+        ⠿
+      </span>
+
+      {/* Color indicator + picker */}
+      <div className="relative">
+        <button
+          type="button"
+          className="h-3 w-3 rounded-sm border border-gray-600 shrink-0"
+          style={{ backgroundColor: config.color }}
+          onClick={() => setShowColorPicker(!showColorPicker)}
+          title="Lane color"
+        />
+        {showColorPicker && (
+          <div className="absolute left-0 top-5 z-50 flex flex-wrap gap-1 rounded bg-gray-800 p-1.5 shadow-lg" style={{ width: 82 }}>
+            {LANE_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className="h-4 w-4 rounded-sm border border-gray-600 hover:scale-110 transition-transform"
+                style={{ backgroundColor: c }}
+                onClick={() => {
+                  onColorChange(c);
+                  setShowColorPicker(false);
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Editable name */}
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitRename();
+            if (e.key === "Escape") {
+              setEditValue(config.name);
+              setEditing(false);
+            }
+          }}
+          maxLength={30}
+          className="min-w-0 flex-1 rounded bg-gray-800 px-1 py-0.5 text-xs text-white outline-none focus:ring-1 focus:ring-indigo-500"
+        />
+      ) : (
+        <span
+          className="min-w-0 flex-1 truncate cursor-text"
+          onDoubleClick={() => {
+            setEditValue(config.name);
+            setEditing(true);
+          }}
+          title="Double-click to rename"
+        >
+          {config.name}
+        </span>
+      )}
+
+      {/* Delete button */}
+      <button
+        type="button"
+        onClick={onDelete}
+        className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs shrink-0"
+        title="Delete lane"
+      >
+        ✕
+      </button>
     </div>
   );
 }

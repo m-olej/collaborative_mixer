@@ -36,6 +36,12 @@ interface DesignViewState {
 
   /** Get current sync state for a view. */
   getSync: (viewId: string) => boolean;
+
+  /** Create a new named design view (returns the viewId). */
+  createView: (viewId: string) => void;
+
+  /** Remove a design view. */
+  removeView: (viewId: string) => void;
 }
 
 export const useDesignViewStore = create<DesignViewState>((set, get) => ({
@@ -117,5 +123,32 @@ export const useDesignViewStore = create<DesignViewState>((set, get) => ({
 
   getSync: (viewId) => {
     return get().syncByView[viewId] ?? false;
+  },
+
+  createView: (viewId) => {
+    set((state) => {
+      if (state.designViews[viewId]) return state;
+      return {
+        designViews: {
+          ...state.designViews,
+          [viewId]: { synth_params: { ...DEFAULT_SYNTH_PARAMS } },
+        },
+        activeViewId: viewId,
+      };
+    });
+  },
+
+  removeView: (viewId) => {
+    set((state) => {
+      const { [viewId]: _, ...rest } = state.designViews;
+      const { [viewId]: __, ...restSync } = state.syncByView;
+      return {
+        designViews: rest,
+        syncByView: restSync,
+        activeViewId: state.activeViewId === viewId
+          ? Object.keys(rest)[0] ?? ""
+          : state.activeViewId,
+      };
+    });
   },
 }));

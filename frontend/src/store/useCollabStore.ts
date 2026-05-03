@@ -30,7 +30,7 @@ interface CollabState {
 
   setLocalUser: (user: Partial<CollabUser>) => void;
   setRemoteUsers: (users: Record<string, RemoteUser>) => void;
-  updateRemoteCursor: (username: string, color: string, x: number, y: number) => void;
+  updateRemoteCursor: (username: string, color: string, x: number, y: number, activeView?: string) => void;
   updateRemoteSelection: (username: string, color: string, selection: CollabSelection | null) => void;
   removeRemoteUser: (username: string) => void;
   setLocalSelection: (selection: CollabSelection | null) => void;
@@ -54,7 +54,7 @@ export const useCollabStore = create<CollabState>((set) => ({
 
   setRemoteUsers: (users) => set({ remoteUsers: users }),
 
-  updateRemoteCursor: (username, color, x, y) =>
+  updateRemoteCursor: (username, color, x, y, activeView) =>
     set((s) => ({
       remoteUsers: {
         ...s.remoteUsers,
@@ -64,6 +64,7 @@ export const useCollabStore = create<CollabState>((set) => ({
           color,
           cursor: { x, y },
           selection: s.remoteUsers[username]?.selection ?? null,
+          activeView: activeView ?? s.remoteUsers[username]?.activeView,
         },
       },
     })),

@@ -1,4 +1,3 @@
-import { useCallback } from "react";
 import type { Track, Sample } from "../../types/daw";
 import { TimelineClip } from "./TimelineClip";
 
@@ -14,7 +13,6 @@ interface TimelineLaneProps {
   projectId: number;
   snapPositionMs: (rawMs: number) => number;
   onDrop: (e: React.DragEvent) => void;
-  onDragOver: (e: React.DragEvent) => void;
 }
 
 /**
@@ -23,6 +21,7 @@ interface TimelineLaneProps {
  * Also draws beat grid lines in the background.
  */
 export function TimelineLane({
+  laneIndex,
   tracks,
   samples,
   height,
@@ -33,7 +32,6 @@ export function TimelineLane({
   projectId,
   snapPositionMs,
   onDrop,
-  onDragOver,
 }: TimelineLaneProps) {
   // Generate beat grid lines
   const barMs = msPerBeat * beatsPerBar;
@@ -45,19 +43,20 @@ export function TimelineLane({
     lines.push({ x: ms * pxPerMs, isBar });
   }
 
-  const handleClipDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  }, []);
-
   return (
     <div
+      data-lane={laneIndex}
       className="relative border-b border-gray-800"
       style={{ height, width: totalWidth }}
       onDrop={onDrop}
       onDragOver={(e) => {
-        onDragOver(e);
-        handleClipDragOver(e);
+        e.preventDefault();
+        // Set correct dropEffect based on drag source
+        if (e.dataTransfer.types.includes("application/x-clip-move")) {
+          e.dataTransfer.dropEffect = "move";
+        } else {
+          e.dataTransfer.dropEffect = "copy";
+        }
       }}
     >
       {/* Beat grid lines */}

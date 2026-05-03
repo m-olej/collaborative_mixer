@@ -46,7 +46,7 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
   const params = useDesignViewStore((s) => s.designViews[viewId]?.synth_params ?? s.getActiveParams());
   const patchView = useDesignViewStore((s) => s.patchView);
   const channel = useSocketStore((s) => s.channel);
-  const { init: initWorklet, feedPcm, mixPcm, destroy: destroyWorklet } = useAudioWorklet();
+  const { init: initWorklet, feedPcm, voicePcm, destroy: destroyWorklet } = useAudioWorklet();
   const [envTab, setEnvTab] = useState<"amp" | "filter">("amp");
   const [currentPreset, setCurrentPreset] = useState("");
 
@@ -82,13 +82,16 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
       if (!(payload instanceof ArrayBuffer)) return;
       // Ensure worklet is initialized (resumes AudioContext on first interaction).
       initWorklet();
+      // Extract MIDI note from wire frame byte 1 (voice identifier).
+      const header = new Uint8Array(payload, 0, 2);
+      const midi = header[1];
       // Extract PCM from the wire frame (skip 516-byte header+FFT).
       const pcm = new Float32Array(payload, 516);
-      // Mix additively into ring buffer for polyphonic playback.
-      mixPcm(pcm);
+      // Per-voice mix: sequential within same voice, additive across voices.
+      voicePcm(midi, pcm);
     });
     return () => channel.off("voice_audio", ref);
-  }, [channel, mixPcm, initWorklet]);
+  }, [channel, voicePcm, initWorklet]);
 
   // ── Debounced server param sync (no audio render) ──────────────────────────
   const sendParamSync = useCallback(
@@ -101,15 +104,6 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
         channel.push("sync_params", { ...nextParams, view_id: viewId } as unknown as Record<string, unknown>);
         debounceTimerRef.current = null;
       }, DEBOUNCE_MS);
-    },
-    [channel, viewId],
-  );
-
-  /** Render Sound — sends patch_update which triggers server render + audio response. */
-  const sendRenderSound = useCallback(
-    (nextParams: SynthParams) => {
-      if (!channel) return;
-      channel.push("patch_update", { ...nextParams, view_id: viewId } as unknown as Record<string, unknown>);
     },
     [channel, viewId],
   );
@@ -194,11 +188,6 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
               { value: "noise", label: "White Noise" },
             ]}
             onChange={(v) => handleChange("osc_shape", v as OscShape)}
-          />
-          <SliderControl
-            label="Frequency" unit="Hz"
-            value={params.frequency} min={20} max={2000} step={1}
-            onChange={(v) => handleChange("frequency", v)}
           />
         </SectionCard>
 
@@ -408,15 +397,6 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
             onChange={(v) => handleChange("volume", v)}
           />
         </div>
-        <button
-          type="button"
-          onClick={() => sendRenderSound(params)}
-          disabled={!channel}
-          className="shrink-0 rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium
-                     hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {channel ? "Render Sound" : "Connecting…"}
-        </button>
       </div>
 
       {/* ── Keyboard ─────────────────────────────────────────────────── */}

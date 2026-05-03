@@ -7,6 +7,13 @@ interface UserCursor {
   cursor_ms: number;
 }
 
+export interface LaneConfig {
+  name: string;
+  color: string;
+}
+
+const DEFAULT_LANE_COLOR = "#374151";
+
 interface TimelineState {
   tracks: Track[];
   /** Map of trackId → etag for optimistic locking on updates. */
@@ -27,6 +34,11 @@ interface TimelineState {
   selectedTrackIds: Set<number>;
   /** Remote users currently dragging tracks. */
   draggingByUser: Record<string, { color: string; track_ids: number[] }>;
+
+  /** Lane metadata (local UI state). */
+  laneConfigs: Record<number, LaneConfig>;
+  /** Display order of lane indices. */
+  laneOrder: number[];
 
   fetchTracks: (projectId: number) => Promise<void>;
   placeTrack: (
@@ -57,21 +69,37 @@ interface TimelineState {
   toggleTrackSelection: (id: number) => void;
   /** Clear all selected tracks. */
   clearSelection: () => void;
-  /** Batch-move all selected tracks by a delta. */
+  /** Batch-move tracks by a delta. Uses explicit IDs if provided, else selectedTrackIds. */
   batchMoveSelectedTracks: (
     projectId: number,
     deltaMs: number,
     deltaLane: number,
+    trackIds?: number[],
   ) => Promise<void>;
   /** Handle remote drag highlight. */
   setDraggingByUser: (username: string, color: string, trackIds: number[]) => void;
   /** Clear remote drag highlight. */
   clearDraggingByUser: (username: string) => void;
 
+  /** Add a new lane, returns its index. */
+  addLane: () => number;
+  /** Remove a lane. If deleteTracks is true, removes all tracks in it. */
+  removeLane: (laneIndex: number, projectId: number, deleteTracks: boolean) => void;
+  /** Rename a lane. */
+  renameLane: (laneIndex: number, name: string) => void;
+  /** Set a lane's color. */
+  setLaneColor: (laneIndex: number, color: string) => void;
+  /** Set the display order of lanes. */
+  setLaneOrder: (order: number[]) => void;
+  /** Ensure lane configs cover all track lane indices. */
+  syncLanesFromTracks: () => void;
+
   /** Called from WebSocket broadcast handlers to sync state. */
   handleTrackPlaced: (track: Track) => void;
   handleTrackMoved: (track: Track) => void;
   handleTrackRemoved: (trackId: number) => void;
+  /** Apply remote lane config update. */
+  handleRemoteLaneUpdate: (configs: Record<number, LaneConfig>, order: number[]) => void;
 }
 
 export const useTimelineStore = create<TimelineState>((set, get) => ({
@@ -87,12 +115,18 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   userCursors: {},
   selectedTrackIds: new Set<number>(),
   draggingByUser: {},
+  laneConfigs: { 0: { name: "Lane 1", color: DEFAULT_LANE_COLOR } },
+  laneOrder: [0],
 
   fetchTracks: async (projectId: number) => {
     set({ loading: true, error: null });
     try {
-      const tracks = await api.listTracks(projectId);
-      set({ tracks, loading: false });
+      const { tracks, etags: rawEtags } = await api.listTracks(projectId);
+      const etags: Record<number, string> = {};
+      for (const [k, v] of Object.entries(rawEtags)) {
+        etags[Number(k)] = v;
+      }
+      set({ tracks, etags, loading: false });
     } catch (e) {
       set({ error: (e as Error).message, loading: false });
     }
@@ -175,11 +209,12 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     }),
   clearSelection: () => set({ selectedTrackIds: new Set<number>() }),
 
-  batchMoveSelectedTracks: async (projectId, deltaMs, deltaLane) => {
+  batchMoveSelectedTracks: async (projectId, deltaMs, deltaLane, trackIds) => {
     const { selectedTrackIds, tracks, etags } = get();
-    if (selectedTrackIds.size === 0) return;
+    const ids = trackIds ?? Array.from(selectedTrackIds);
+    if (ids.length === 0) return;
 
-    const moves = Array.from(selectedTrackIds).map((id) => {
+    const moves = ids.map((id) => {
       const track = tracks.find((t) => t.id === id);
       return {
         id,
@@ -221,6 +256,81 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       return { draggingByUser: rest };
     }),
 
+  addLane: () => {
+    const { laneOrder, laneConfigs } = get();
+    const newIndex = laneOrder.length === 0 ? 0 : Math.max(...laneOrder) + 1;
+    set({
+      laneConfigs: {
+        ...laneConfigs,
+        [newIndex]: { name: `Lane ${newIndex + 1}`, color: DEFAULT_LANE_COLOR },
+      },
+      laneOrder: [...laneOrder, newIndex],
+    });
+    return newIndex;
+  },
+
+  removeLane: (laneIndex, projectId, deleteTracks) => {
+    const { tracks, laneOrder, laneConfigs } = get();
+    if (deleteTracks) {
+      const laneTracks = tracks.filter((t) => t.lane_index === laneIndex);
+      for (const t of laneTracks) {
+        get().removeTrack(projectId, t.id);
+      }
+    }
+    const { [laneIndex]: _, ...restConfigs } = laneConfigs;
+    set({
+      laneConfigs: restConfigs,
+      laneOrder: laneOrder.filter((i) => i !== laneIndex),
+    });
+  },
+
+  renameLane: (laneIndex, name) =>
+    set((s) => ({
+      laneConfigs: {
+        ...s.laneConfigs,
+        [laneIndex]: { ...s.laneConfigs[laneIndex], name },
+      },
+    })),
+
+  setLaneColor: (laneIndex, color) =>
+    set((s) => ({
+      laneConfigs: {
+        ...s.laneConfigs,
+        [laneIndex]: { ...s.laneConfigs[laneIndex], color },
+      },
+    })),
+
+  setLaneOrder: (order) => set({ laneOrder: order }),
+
+  syncLanesFromTracks: () => {
+    const { tracks, laneConfigs, laneOrder } = get();
+    const usedIndices = new Set(tracks.map((t) => t.lane_index));
+    let updated = false;
+    const newConfigs = { ...laneConfigs };
+    const newOrder = [...laneOrder];
+
+    for (const idx of usedIndices) {
+      if (!newConfigs[idx]) {
+        newConfigs[idx] = { name: `Lane ${idx + 1}`, color: DEFAULT_LANE_COLOR };
+        updated = true;
+      }
+      if (!newOrder.includes(idx)) {
+        newOrder.push(idx);
+        updated = true;
+      }
+    }
+    // Ensure at least one lane exists
+    if (newOrder.length === 0) {
+      newConfigs[0] = { name: "Lane 1", color: DEFAULT_LANE_COLOR };
+      newOrder.push(0);
+      updated = true;
+    }
+
+    if (updated) {
+      set({ laneConfigs: newConfigs, laneOrder: newOrder });
+    }
+  },
+
   // --- WebSocket sync handlers ---
 
   handleTrackPlaced: (track) =>
@@ -238,4 +348,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     set((s) => ({
       tracks: s.tracks.filter((t) => t.id !== trackId),
     })),
+
+  handleRemoteLaneUpdate: (configs, order) =>
+    set({ laneConfigs: configs, laneOrder: order }),
 }));
