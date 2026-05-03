@@ -18,12 +18,14 @@ pub const SHAPE_SINE: &str = "sine";
 pub const SHAPE_SQUARE: &str = "square";
 #[allow(dead_code)]
 pub const SHAPE_TRIANGLE: &str = "triangle";
+#[allow(dead_code)]
+pub const SHAPE_NOISE: &str = "noise";
 
 /// Complete parameter set that defines the synthesizer sound.
 #[derive(Debug, Clone, NifMap)]
 pub struct SynthState {
     // ── Oscillator ──────────────────────────────────────────────────────
-    /// Waveform shape: "saw" | "sine" | "square" | "triangle".
+    /// Waveform shape: "saw" | "sine" | "square" | "triangle" | "noise".
     pub osc_shape: String,
     /// Fundamental pitch in Hz (e.g. 440.0 = A4).
     pub frequency: f32,
@@ -42,7 +44,7 @@ pub struct SynthState {
     pub cutoff: f32,
     /// Filter resonance / Q control (0.0–1.0).
     pub resonance: f32,
-    /// Filter topology: "svf" | "moog".
+    /// Filter topology: "svf" | "moog" | "highpass" | "bandpass".
     pub filter_type: String,
 
     // ── Drive / Distortion ──────────────────────────────────────────────
@@ -80,6 +82,28 @@ pub struct SynthState {
     // ── Amp ─────────────────────────────────────────────────────────────
     /// Final output volume (0.0–1.0).
     pub volume: f32,
+
+    // ── Amp Envelope (ADSR) ─────────────────────────────────────────────
+    /// Attack time in milliseconds (0–5000).
+    pub amp_attack_ms: f32,
+    /// Decay time in milliseconds (0–5000).
+    pub amp_decay_ms: f32,
+    /// Sustain level (0.0–1.0).
+    pub amp_sustain: f32,
+    /// Release time in milliseconds (0–5000).
+    pub amp_release_ms: f32,
+
+    // ── Filter Envelope (ADSR) ──────────────────────────────────────────
+    /// Attack time in milliseconds (0–5000).
+    pub filter_attack_ms: f32,
+    /// Decay time in milliseconds (0–5000).
+    pub filter_decay_ms: f32,
+    /// Sustain level (0.0–1.0).
+    pub filter_sustain: f32,
+    /// Release time in milliseconds (0–5000).
+    pub filter_release_ms: f32,
+    /// Filter envelope depth: how many Hz the envelope sweeps above base cutoff.
+    pub filter_env_depth: f32,
 }
 
 impl Default for SynthState {
@@ -106,6 +130,17 @@ impl Default for SynthState {
             reverb_decay: 0.3,
             reverb_mix: 0.0,
             volume: 0.8,
+            // Amp envelope: fast attack, medium decay, full sustain, short release
+            amp_attack_ms: 5.0,
+            amp_decay_ms: 100.0,
+            amp_sustain: 1.0,
+            amp_release_ms: 200.0,
+            // Filter envelope: off by default (depth = 0)
+            filter_attack_ms: 10.0,
+            filter_decay_ms: 300.0,
+            filter_sustain: 0.0,
+            filter_release_ms: 200.0,
+            filter_env_depth: 0.0,
         }
     }
 }

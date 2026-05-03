@@ -292,7 +292,18 @@ defmodule Backend.DawSession.SessionServer do
       chorus_mix: to_float(Map.get(raw, "chorus_mix"), current.chorus_mix),
       reverb_decay: to_float(Map.get(raw, "reverb_decay"), current.reverb_decay),
       reverb_mix: to_float(Map.get(raw, "reverb_mix"), current.reverb_mix),
-      volume: to_float(Map.get(raw, "volume"), current.volume)
+      volume: to_float(Map.get(raw, "volume"), current.volume),
+      # Amp envelope (ADSR)
+      amp_attack_ms: to_float(Map.get(raw, "amp_attack_ms"), current.amp_attack_ms),
+      amp_decay_ms: to_float(Map.get(raw, "amp_decay_ms"), current.amp_decay_ms),
+      amp_sustain: to_float(Map.get(raw, "amp_sustain"), current.amp_sustain),
+      amp_release_ms: to_float(Map.get(raw, "amp_release_ms"), current.amp_release_ms),
+      # Filter envelope (ADSR)
+      filter_attack_ms: to_float(Map.get(raw, "filter_attack_ms"), current.filter_attack_ms),
+      filter_decay_ms: to_float(Map.get(raw, "filter_decay_ms"), current.filter_decay_ms),
+      filter_sustain: to_float(Map.get(raw, "filter_sustain"), current.filter_sustain),
+      filter_release_ms: to_float(Map.get(raw, "filter_release_ms"), current.filter_release_ms),
+      filter_env_depth: to_float(Map.get(raw, "filter_env_depth"), current.filter_env_depth)
     }
   end
 
@@ -392,7 +403,18 @@ defmodule Backend.DawSession.SessionServer do
       chorus_mix: 0.0,
       reverb_decay: 0.3,
       reverb_mix: 0.0,
-      volume: 0.8
+      volume: 0.8,
+      # Amp envelope
+      amp_attack_ms: 5.0,
+      amp_decay_ms: 100.0,
+      amp_sustain: 1.0,
+      amp_release_ms: 200.0,
+      # Filter envelope
+      filter_attack_ms: 10.0,
+      filter_decay_ms: 300.0,
+      filter_sustain: 0.0,
+      filter_release_ms: 200.0,
+      filter_env_depth: 0.0
     }
   end
 

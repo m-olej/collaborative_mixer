@@ -105,6 +105,41 @@ defmodule BackendWeb.TrackController do
     end
   end
 
+  def batch_move(conn, %{"project_id" => project_id, "moves" => moves}) do
+    case Projects.batch_move_tracks(project_id, moves) do
+      {:ok, updated_tracks} ->
+        # Broadcast each moved track to all clients.
+        for track <- updated_tracks do
+          BackendWeb.Endpoint.broadcast(
+            "project:#{project_id}",
+            "track_moved",
+            %{track: track_json(track)}
+          )
+        end
+
+        etags =
+          Map.new(updated_tracks, fn t ->
+            {to_string(t.id), Projects.track_etag(t)}
+          end)
+
+        conn
+        |> put_status(200)
+        |> json(%{
+          data: Enum.map(updated_tracks, &track_json/1),
+          etags: etags
+        })
+
+      {:error, {:etag_mismatch, track_id}} ->
+        conn |> put_status(412) |> json(%{error: "etag_mismatch", track_id: track_id})
+
+      {:error, {:not_found, track_id}} ->
+        conn |> put_status(404) |> json(%{error: "not_found", track_id: track_id})
+
+      {:error, {:update_failed, track_id, _changeset}} ->
+        conn |> put_status(422) |> json(%{error: "update_failed", track_id: track_id})
+    end
+  end
+
   defp track_json(track) do
     %{
       id: track.id,

@@ -10,24 +10,28 @@
 │ name         │  │    │ name         │       │ token (UNIQ) │
 │ bpm          │  ├───►│ s3_key       │   ┌──►│ status       │
 │ time_sig.    │  │    │ position_ms  │   │   │ s3_key       │
-│ count_in_nv  │  │    │ project_id(FK)│──┘   │ project_id(FK)│
+│ count_in_nv  │  │    │ lane_index   │   │   │ project_id(FK)│
+│ lock_version │  │    │ lock_version │   │   │ inserted_at  │
+│ inserted_at  │  │    │ project_id(FK)│──┘   │ updated_at   │
 │ lock_version │  │    │ inserted_at  │       │ inserted_at  │
 │ inserted_at  │  │    │ updated_at   │       │ updated_at   │
 │ updated_at   │  │    └──────────────┘       └──────────────┘
 └──────────────┘  │
                   │    ┌──────────────┐
-                  │    │   samples    │
-                  │    ├──────────────┤
-                  │    │ id (PK)      │
-                  │    │ name         │
-                  │    │ genre        │
-                  │    │ s3_key       │
-                  │    │ duration_ms  │
-                  │    │ input_history│
-                  │    │ bar_count    │
-                  │    │ inserted_at  │
-                  │    │ updated_at   │
-                  │    └──────────────┘
+                  │    ┌───────────────┐
+                  │    │    samples     │
+                  │    ├───────────────┤
+                  │    │ id (PK)       │
+                  │    │ name          │
+                  │    │ genre         │
+                  │    │ s3_key        │
+                  │    │ duration_ms   │
+                  │    │ input_history │
+                  │    │ bar_count     │
+                  │    │ waveform_peaks│
+                  │    │ inserted_at   │
+                  │    │ updated_at    │
+                  │    └───────────────┘
                   │    (no FK — samples are global)
 ```
 
@@ -56,11 +60,13 @@
 | `name` | `varchar` | — | NOT NULL | Track name |
 | `s3_key` | `varchar` | — | NOT NULL | MinIO object key for audio file |
 | `position_ms` | `integer` | `0` | NOT NULL, ≥ 0 | Position on the timeline in milliseconds |
+| `lane_index` | `integer` | `0` | NOT NULL | Lane (row) on the timeline |
+| `lock_version` | `integer` | `1` | NOT NULL | Optimistic locking counter |
 | `project_id` | `bigint` | — | NOT NULL, FK → projects (CASCADE) | Parent project |
 | `inserted_at` | `utc_datetime` | auto | — | |
 | `updated_at` | `utc_datetime` | auto | — | |
 
-**Indexes**: `[:project_id]`
+**Indexes**: `[:project_id]`, `[:project_id, :lane_index]`
 
 ### `samples`
 
@@ -73,6 +79,7 @@
 | `duration_ms` | `integer` | — | nullable | Total duration in milliseconds |
 | `input_history` | `jsonb` | — | nullable | Array of recorded note events (see below) |
 | `bar_count` | `integer` | `1` | NOT NULL, 1–16 | Number of bars in the recording |
+| `waveform_peaks` | `jsonb[]` | `nil` | nullable | Array of `{min, max}` amplitude peaks for timeline thumbnail |
 | `inserted_at` | `utc_datetime` | auto | — | |
 | `updated_at` | `utc_datetime` | auto | — | |
 
@@ -146,7 +153,7 @@ schema "tracks" do
 end
 ```
 
-**Changeset**: casts `[:name, :s3_key, :position_ms]`, validates required `[:name, :s3_key]`, validates `position_ms >= 0`.
+**Changeset**: casts `[:name, :s3_key, :position_ms, :lane_index]`, validates required `[:name, :s3_key]`, validates `position_ms >= 0`, uses `optimistic_lock(:lock_version)`.
 
 ### `Backend.Samples.Sample`
 
@@ -158,11 +165,12 @@ schema "samples" do
   field(:duration_ms, :integer)
   field(:input_history, :map)
   field(:bar_count, :integer, default: 1)
-  timestamps(type: :utc_datetime)
+    field(:waveform_peaks, {:array, :map})
+    timestamps(type: :utc_datetime)
 end
 ```
 
-**Changeset**: casts `[:name, :genre, :s3_key, :duration_ms, :input_history, :bar_count]`, validates required `[:name, :s3_key]`, validates `bar_count` in `1..16`.
+**Changeset**: casts `[:name, :genre, :s3_key, :duration_ms, :input_history, :bar_count, :waveform_peaks]`, validates required `[:name, :s3_key]`, validates `bar_count` in `1..16`.
 
 ### `Backend.Exports.Export`
 
@@ -231,3 +239,4 @@ end
 | `20260417023955` | `create_exports.exs` | Creates `exports` table with unique token index |
 | `20260422120000` | `add_sample_input_history_and_project_count_in.exs` | Adds `samples.input_history` (map) and `projects.count_in_note_value` (string) |
 | `20260422130000` | `add_bar_count_to_samples.exs` | Adds `samples.bar_count` (integer, default 1) |
+| `20260425120000` | `add_lane_index_and_waveform_peaks.exs` | Adds `tracks.lane_index`, `tracks.lock_version`, `samples.waveform_peaks` |

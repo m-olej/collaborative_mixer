@@ -8,9 +8,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAudioWorklet } from "../hooks/useAudioWorklet";
+import { useDesignViewStore } from "../store/useDesignViewStore";
 import { useSocketStore } from "../store/useSocketStore";
 import {
-  DEFAULT_SYNTH_PARAMS,
   type DistortionType,
   type FilterTypeVariant,
   type LfoShape,
@@ -18,7 +18,9 @@ import {
   type OscShape,
   type SynthParams,
 } from "../types/daw";
+import { AdsrEnvelope, type AdsrParams } from "./AdsrEnvelope";
 import { Keyboard, type NoteEvent } from "./Keyboard";
+import { SYNTH_PRESETS, getPresetsByCategory } from "../presets/synthPresets";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,25 +34,24 @@ const DEBOUNCE_MS = 150;
 
 interface SynthControlsProps {
   projectId: number;
+  /** Design view id (e.g. "design:alice"). */
+  viewId: string;
   /** Called on keyboard note-on (for recording workflow). */
   onNoteOn?: (event: NoteEvent) => void;
   /** Called on keyboard note-off (for recording workflow). */
   onNoteOff?: (event: NoteEvent) => void;
 }
 
-export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: SynthControlsProps) {
-  const [params, setParams] = useState<SynthParams>(DEFAULT_SYNTH_PARAMS);
+export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteOff }: SynthControlsProps) {
+  const params = useDesignViewStore((s) => s.designViews[viewId]?.synth_params ?? s.getActiveParams());
+  const patchView = useDesignViewStore((s) => s.patchView);
   const channel = useSocketStore((s) => s.channel);
-  const { init: initWorklet, feedPcm, getContext, destroy: destroyWorklet } = useAudioWorklet();
+  const { init: initWorklet, feedPcm, mixPcm, destroy: destroyWorklet } = useAudioWorklet();
+  const [envTab, setEnvTab] = useState<"amp" | "filter">("amp");
+  const [currentPreset, setCurrentPreset] = useState("");
 
   // ── Real-time refs ────────────────────────────────────────────────────────
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Active note preview sources: midi → { source, gain }
-  // Used to stop individual notes on key release.
-  const activeNotesRef = useRef<Map<number, { source: AudioBufferSourceNode; gain: GainNode }>>(
-    new Map(),
-  );
 
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -74,85 +75,75 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
     return () => channel.off("audio_buffer", ref);
   }, [channel, feedPcm]);
 
-  // ── Note preview handler (polyphonic keyboard preview via AudioBufferSourceNode) ──
+  // ── Streaming voice audio handler (polyphonic keyboard preview via AudioWorklet) ──
   useEffect(() => {
     if (!channel) return;
-    const ref = channel.on("note_audio", (payload: unknown) => {
+    const ref = channel.on("voice_audio", (payload: unknown) => {
       if (!(payload instanceof ArrayBuffer)) return;
-      const ctx = getContext();
-      if (!ctx) return;
-
-      // Extract MIDI number from byte 1 (embedded by the server).
-      const header = new Uint8Array(payload, 0, 4);
-      const midi = header[1];
-
-      // Extract PCM from the wire frame.
+      // Ensure worklet is initialized (resumes AudioContext on first interaction).
+      initWorklet();
+      // Extract PCM from the wire frame (skip 516-byte header+FFT).
       const pcm = new Float32Array(payload, 516);
-
-      // Stop any existing source for this MIDI note (re-trigger).
-      const existing = activeNotesRef.current.get(midi);
-      if (existing) {
-        try { existing.source.stop(); } catch { /* already stopped */ }
-        activeNotesRef.current.delete(midi);
-      }
-
-      // Create an AudioBuffer from the PCM data.
-      const audioBuffer = ctx.createBuffer(1, pcm.length, 44100);
-      audioBuffer.getChannelData(0).set(pcm);
-
-      // Create source + gain for individual note control.
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      const gain = ctx.createGain();
-      gain.gain.value = 1.0;
-      source.connect(gain);
-      gain.connect(ctx.destination);
-      source.start();
-
-      // Clean up when the source finishes naturally.
-      source.onended = () => {
-        activeNotesRef.current.delete(midi);
-      };
-
-      activeNotesRef.current.set(midi, { source, gain });
+      // Mix additively into ring buffer for polyphonic playback.
+      mixPcm(pcm);
     });
-    return () => channel.off("note_audio", ref);
-  }, [channel, getContext]);
+    return () => channel.off("voice_audio", ref);
+  }, [channel, mixPcm, initWorklet]);
 
-  // ── Debounced server render ───────────────────────────────────────────────
-  const sendPatchUpdate = useCallback(
+  // ── Debounced server param sync (no audio render) ──────────────────────────
+  const sendParamSync = useCallback(
     (nextParams: SynthParams) => {
       if (!channel) return;
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
       }
       debounceTimerRef.current = setTimeout(() => {
-        channel.push("patch_update", nextParams as unknown as Record<string, unknown>);
+        channel.push("sync_params", { ...nextParams, view_id: viewId } as unknown as Record<string, unknown>);
         debounceTimerRef.current = null;
       }, DEBOUNCE_MS);
     },
-    [channel],
+    [channel, viewId],
+  );
+
+  /** Render Sound — sends patch_update which triggers server render + audio response. */
+  const sendRenderSound = useCallback(
+    (nextParams: SynthParams) => {
+      if (!channel) return;
+      channel.push("patch_update", { ...nextParams, view_id: viewId } as unknown as Record<string, unknown>);
+    },
+    [channel, viewId],
   );
 
   /** Send immediately (no debounce) — used for keyboard note triggers. */
   const sendNotePreview = useCallback(
     (frequency: number, midi: number) => {
       if (!channel) return;
-      channel.push("note_preview", { frequency, midi });
+      channel.push("note_preview", { frequency, midi, view_id: viewId });
     },
-    [channel],
+    [channel, viewId],
   );
 
   // ── Parameter change handler ──────────────────────────────────────────────
   const handleChange = useCallback(
     <K extends keyof SynthParams>(key: K, value: SynthParams[K]) => {
-      setParams((prev) => {
-        const next = { ...prev, [key]: value };
-        sendPatchUpdate(next);
-        return next;
-      });
+      const next = { ...params, [key]: value };
+      patchView(viewId, { [key]: value });
+      sendParamSync(next);
+      setCurrentPreset("");
     },
-    [sendPatchUpdate],
+    [params, patchView, viewId, sendParamSync],
+  );
+
+  // ── Preset loader ──────────────────────────────────────────────────────────
+  const handlePresetSelect = useCallback(
+    (presetName: string) => {
+      const preset = SYNTH_PRESETS.find((p) => p.name === presetName);
+      if (!preset) return;
+      patchView(viewId, preset.params);
+      sendParamSync(preset.params);
+      setCurrentPreset(presetName);
+    },
+    [patchView, viewId, sendParamSync],
   );
 
   // ── Keyboard note-on / note-off ───────────────────────────────────────────
@@ -171,27 +162,23 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
 
   const handleNoteOff = useCallback(
     (event: NoteEvent) => {
-      // Stop the preview audio for this note with a short fade-out to avoid clicks.
-      const active = activeNotesRef.current.get(event.midi);
-      if (active) {
-        const ctx = getContext();
-        const now = ctx?.currentTime ?? 0;
-        active.gain.gain.setTargetAtTime(0, now, 0.015); // ~45ms fade
-        setTimeout(() => {
-          try { active.source.stop(); } catch { /* already stopped */ }
-          activeNotesRef.current.delete(event.midi);
-        }, 80);
-      }
+      // Notify server to trigger ADSR release on the voice.
+      // The server continues streaming the release tail + effects decay
+      // until the voice is culled (voice_done event).
+      channel?.push("key_up", { midi: event.midi });
       onNoteOff?.(event);
     },
-    [onNoteOff, getContext],
+    [channel, onNoteOff],
   );
 
   return (
     <div className="flex flex-col gap-5 rounded-xl bg-gray-900 p-5 text-gray-100">
-      <h2 className="text-lg font-semibold tracking-wide text-indigo-400">
-        Synthesizer
-      </h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold tracking-wide text-indigo-400">
+          Synthesizer
+        </h2>
+        <PresetSelector value={currentPreset} onSelect={handlePresetSelect} />
+      </div>
 
       {/* ── Oscillator + Unison ──────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4">
@@ -201,9 +188,10 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
             value={params.osc_shape}
             options={[
               { value: "saw", label: "Sawtooth" },
-              { value: "sine", label: "Sine" },
               { value: "square", label: "Square" },
               { value: "triangle", label: "Triangle" },
+              { value: "sine", label: "Sine" },
+              { value: "noise", label: "White Noise" },
             ]}
             onChange={(v) => handleChange("osc_shape", v as OscShape)}
           />
@@ -240,8 +228,10 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
             label="Type"
             value={params.filter_type}
             options={[
-              { value: "svf", label: "SVF (clean)" },
-              { value: "moog", label: "Moog (warm)" },
+              { value: "svf", label: "Lowpass (SVF)" },
+              { value: "moog", label: "Lowpass (Moog)" },
+              { value: "highpass", label: "Highpass" },
+              { value: "bandpass", label: "Bandpass" },
             ]}
             onChange={(v) => handleChange("filter_type", v as FilterTypeVariant)}
           />
@@ -305,7 +295,7 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
             value={params.distortion_type}
             options={[
               { value: "off", label: "Off" },
-              { value: "soft_clip", label: "Soft Clip" },
+              { value: "soft_clip", label: "Soft Clip (tanh)" },
               { value: "hard_clip", label: "Hard Clip" },
               { value: "atan", label: "Arctan" },
             ]}
@@ -350,6 +340,65 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
         </SectionCard>
       </div>
 
+      {/* ── Envelopes (ADSR) ─────────────────────────────────────────── */}
+      <SectionCard title="Envelopes">
+        <div className="flex gap-2 border-b border-gray-700 pb-1">
+          <button
+            type="button"
+            onClick={() => setEnvTab("amp")}
+            className={`px-3 py-0.5 text-[11px] font-semibold rounded-t ${
+              envTab === "amp"
+                ? "bg-indigo-600/30 text-indigo-300"
+                : "text-gray-500 hover:text-gray-300"
+            }`}
+          >
+            AMP
+          </button>
+          <button
+            type="button"
+            onClick={() => setEnvTab("filter")}
+            className={`px-3 py-0.5 text-[11px] font-semibold rounded-t ${
+              envTab === "filter"
+                ? "bg-yellow-600/30 text-yellow-300"
+                : "text-gray-500 hover:text-gray-300"
+            }`}
+          >
+            FILTER
+          </button>
+        </div>
+        {envTab === "amp" ? (
+          <AdsrEnvelope
+            label="AMP"
+            params={{
+              attack_ms: params.amp_attack_ms,
+              decay_ms: params.amp_decay_ms,
+              sustain: params.amp_sustain,
+              release_ms: params.amp_release_ms,
+            }}
+            onChange={(key, value) => {
+              const paramKey = `amp_${key}` as keyof SynthParams;
+              handleChange(paramKey, value as never);
+            }}
+          />
+        ) : (
+          <AdsrEnvelope
+            label="FILTER"
+            params={{
+              attack_ms: params.filter_attack_ms,
+              decay_ms: params.filter_decay_ms,
+              sustain: params.filter_sustain,
+              release_ms: params.filter_release_ms,
+            }}
+            onChange={(key, value) => {
+              const paramKey = `filter_${key}` as keyof SynthParams;
+              handleChange(paramKey, value as never);
+            }}
+            envDepth={params.filter_env_depth}
+            onEnvDepthChange={(v) => handleChange("filter_env_depth", v)}
+          />
+        )}
+      </SectionCard>
+
       {/* ── Volume + Render ──────────────────────────────────────────── */}
       <div className="flex items-end gap-4">
         <div className="flex-1">
@@ -361,7 +410,7 @@ export function SynthControls({ projectId: _projectId, onNoteOn, onNoteOff }: Sy
         </div>
         <button
           type="button"
-          onClick={() => sendPatchUpdate(params)}
+          onClick={() => sendRenderSound(params)}
           disabled={!channel}
           className="shrink-0 rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium
                      hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
@@ -462,5 +511,32 @@ function SelectControl({ label, value, options, onChange }: SelectControlProps) 
         ))}
       </select>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PresetSelector
+// ---------------------------------------------------------------------------
+
+function PresetSelector({ value, onSelect }: { value: string; onSelect: (name: string) => void }) {
+  const categories = getPresetsByCategory();
+
+  return (
+    <select
+      value={value}
+      onChange={(e) => {
+        if (e.target.value) onSelect(e.target.value);
+      }}
+      className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300 border border-gray-700"
+    >
+      <option value="">Presets…</option>
+      {Array.from(categories.entries()).map(([category, presets]) => (
+        <optgroup key={category} label={category}>
+          {presets.map((p) => (
+            <option key={p.name} value={p.name}>{p.name}</option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
   );
 }

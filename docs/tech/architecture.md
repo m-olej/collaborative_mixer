@@ -8,7 +8,7 @@ Cloud DAW is a three-layer system where the browser, Elixir application server, 
 ┌─────────────────────────────────────────────────────┐
 │  Browser (React + Web Audio API + Canvas)            │
 │  - SPA rendered in the browser                       │
-│  - AudioWorklet for PCM playback                     │
+│  - AudioWorklet for PCM playback (ring buffer)       │
 │  - Canvas for FFT/oscilloscope/piano roll rendering  │
 └──────────────────────┬──────────────────────────────┘
                        │
@@ -20,7 +20,9 @@ Cloud DAW is a three-layer system where the browser, Elixir application server, 
 │  - Phoenix Channels for real-time events             │
 │  - REST controllers for persistent resources         │
 │  - GenServer per project session (RAM state)         │
-│  - DynamicSupervisor for session lifecycle           │
+│  - GenServer per user session (playback pacing)      │
+│  - GenServer per active voice (streaming audio)      │
+│  - DynamicSupervisors for session lifecycle          │
 └──────────────────────┬──────────────────────────────┘
                        │
               Rustler NIF call (in-process, no HTTP)
@@ -28,7 +30,9 @@ Cloud DAW is a three-layer system where the browser, Elixir application server, 
 ┌──────────────────────▼──────────────────────────────┐
 │  Rust DSP Engine  (compiled as native .so)           │
 │  - fundsp oscillators + filters + effects            │
+│  - ADSR envelopes (amp + filter modulation)          │
 │  - rustfft for spectrum analysis                     │
+│  - ResourceArc-backed stateful voices + timeline     │
 │  - Runs on BEAM DirtyCpu schedulers                  │
 └─────────────────────────────────────────────────────┘
 ```
@@ -39,7 +43,7 @@ Cloud DAW is a three-layer system where the browser, Elixir application server, 
 |---|---|---|
 | PostgreSQL | Ecto + Postgrex | Persistent: projects, tracks, samples metadata, exports |
 | MinIO | ExAws S3 API | Object storage for audio files and exported WAVs |
-| RAM (BEAM) | Elixir GenServer | Volatile: live mixer state (faders, EQ, playhead), synth parameters |
+| RAM (BEAM) | Elixir GenServer | Volatile: live mixer state (faders, EQ, playhead), synth parameters per design view |
 
 ## Infrastructure (docker-compose)
 
@@ -58,34 +62,45 @@ Persistent Docker volumes:
 
 ## OTP Supervision Tree
 
-The backend application starts the following supervision tree:
-
 ```
-Backend.Application (one_for_one)
-├── BackendWeb.Telemetry          # Telemetry metrics reporter
-├── Backend.Repo                  # Ecto repository (PostgreSQL connection pool)
-├── DNSCluster                    # Distributed node discovery (noop in dev)
+Backend.Supervisor (one_for_one)
+├── BackendWeb.Telemetry              # Telemetry metrics reporter
+├── Backend.Repo                      # Ecto repository (PostgreSQL connection pool)
+├── DNSCluster                        # Distributed node discovery (noop in dev)
 ├── {Phoenix.PubSub, name: Backend.PubSub}
+├── BackendWeb.Presence               # Phoenix.Presence tracker
 ├── {Registry, name: Backend.SessionRegistry, keys: :unique}
-├── Backend.DawSession.SessionSupervisor   # DynamicSupervisor
-└── BackendWeb.Endpoint           # Bandit HTTP server
+├── Backend.DawSession.SessionSupervisor       # DynamicSupervisor for ProjectSession
+├── Backend.DawSession.UserSessionSupervisor   # DynamicSupervisor for UserSession
+└── BackendWeb.Endpoint               # Bandit HTTP server
 ```
 
 ### Session Process Lifecycle
 
-Each project that has active WebSocket clients gets its own `SessionServer` GenServer:
+Each project with active WebSocket clients gets its own `ProjectSession` GenServer. Each user gets a `UserSession` for playback pacing. Each active note gets a `VoiceStreamer` for streaming audio.
 
 ```
-SessionSupervisor (DynamicSupervisor, :one_for_one)
-├── SessionServer (project_id: 1)   ← registered via Registry
-├── SessionServer (project_id: 5)
-└── SessionServer (project_id: 12)
+SessionSupervisor (DynamicSupervisor)
+├── ProjectSession (project_id: 1)       ← registered via Registry
+├── ProjectSession (project_id: 5)
+└── ProjectSession (project_id: 12)
+
+UserSessionSupervisor (DynamicSupervisor)
+├── UserSession ({:user, 1, "alice"})    ← per-user playback pacing
+├── UserSession ({:user, 1, "bob"})
+└── UserSession ({:user, 5, "charlie"})
+
+VoiceStreamer processes (temporary, spawned per note)
+├── VoiceStreamer (midi: 60, project: 1) ← spawned by channel on note_preview
+├── VoiceStreamer (midi: 64, project: 1) ← dies when voice is done
+└── VoiceStreamer (midi: 67, project: 1)
 ```
 
-Sessions are started on-demand when the first client joins a project channel (`ensure_started/1` is idempotent). Each session holds:
+Sessions are started on-demand when the first client joins a project channel (`ensure_started/1` is idempotent). Each ProjectSession holds:
 
-- Mixer state: track volumes, mutes, 3-band EQ, master volume, transport
-- Synthesizer parameters: oscillator, filter, LFO, effects, volume (21 fields)
+- Mixer state: track volumes, mutes, pans, 3-band EQ, master volume, transport
+- Design views: per-view synth parameters (29 fields each including ADSR envelopes)
+- Timeline engine: Rust ResourceArc for mmap-backed audio playback
 - Last bar render cache: for `save_sample` without re-rendering
 
 ## Communication Protocol Separation
@@ -93,19 +108,23 @@ Sessions are started on-demand when the first client joins a project channel (`e
 | Layer | Protocol | Carries |
 |---|---|---|
 | WebSocket | Binary frames | PCM Float32 audio, FFT Uint8 spectrum |
-| WebSocket | JSON text | Channel control (join, init_state, slider_update) |
+| WebSocket | JSON text | Channel control (join, init_state, slider_update, design_view_update) |
 | REST API | JSON | Persistent metadata: projects, tracks, samples, exports |
 | REST API | multipart | File upload for audio samples |
 | REST API | binary | Streaming download of exported WAV files |
 
 **Hard boundary**: REST is never used for real-time mixing. WebSocket is never used for persistent storage.
 
-## Request Flow Examples
+## Audio Pipelines
 
-### Synth Patch Update (WebSocket)
+The system has three independent audio pipelines:
+
+### 1. Synth Render (stateless, one-shot)
+
+Used by "Render Sound" button and polyphonic bar rendering. All DSP nodes are constructed fresh per call — pure function.
 
 ```
-Browser                    Phoenix Channel         SessionServer          Rust NIF
+Browser                    Phoenix Channel         ProjectSession          Rust NIF
    │                            │                       │                    │
    │── patch_update (JSON) ────►│                       │                    │
    │                            │── call {:patch_and_   │                    │
@@ -117,34 +136,58 @@ Browser                    Phoenix Channel         SessionServer          Rust N
    │◄── audio_buffer (binary) ──│                       │                    │
 ```
 
-### Note Preview (WebSocket, non-blocking)
+### 2. Streaming Voice (stateful, burst & pace)
+
+Used by keyboard note preview. Each note spawns a `VoiceStreamer` GenServer that owns a persistent Rust `SynthVoiceResource`. The voice retains oscillator phase, envelope position, filter state, and effects buffers across chunk renders.
 
 ```
-Browser              Channel Process          SessionServer           Task
+Browser              Channel Process          VoiceStreamer           Rust NIF
    │                      │                        │                    │
    │── note_preview ─────►│                        │                    │
-   │                      │── cast {:render_       │                    │
-   │                      │   note_preview} ──────►│                    │
-   │                      │                        │── Task.start ─────►│
-   │                      │                        │   (returns immed.) │
-   │                      │                        │                    │── render_synth (DirtyCpu)
-   │                      │◄─── {:note_audio, midi, binary} ───────────│
-   │◄── note_audio ───────│                        │                    │
+   │                      │── start_link ─────────►│                    │
+   │                      │   (channel_pid, midi,  │── create_synth    │
+   │                      │    synth_params, freq)  │   _voice ────────►│
+   │                      │                        │◄── ResourceArc ───│
+   │                      │                        │                    │
+   │                      │                        │── render_voice     │
+   │                      │                        │   _chunk(8820) ───►│
+   │                      │◄── {:voice_audio, ─────│◄── binary frame ──│  ← 200ms burst
+   │◄── voice_audio ──────│     midi, binary}      │                    │
+   │                      │                        │                    │
+   │                      │              ┌─────── :tick (50ms) ─────────┤
+   │                      │              │         │── render_voice     │
+   │                      │              │         │   _chunk(2205) ───►│
+   │                      │◄── {:voice_audio} ─────│◄── binary frame ──│  ← 50ms pace
+   │◄── voice_audio ──────│              │         │                    │
+   │                      │              └─────────┤                    │
+   │                      │                        │                    │
+   │── key_up ───────────►│── note_off ───────────►│── voice_note_off ─►│  ← trigger release
+   │                      │                        │                    │
+   │                      │              ┌── :tick continues until ─────┤
+   │                      │              │  voice_is_done() == true     │
+   │                      │              │         │                    │
+   │◄── voice_done ───────│◄── {:voice_done} ─────│ (process exits)    │
 ```
 
-### Project Update (REST, optimistic locking)
+### 3. Timeline Playback (stateful, burst & pace)
+
+Used by mixer timeline. `UserSession` drives pacing; `ProjectSession` delegates to Rust engine.
 
 ```
-Browser                   ProjectController       Projects Context
-   │                           │                        │
-   │── GET /projects/5 ──────►│                        │
-   │◄── {project, ETag: "x"} ─│                        │
-   │                           │                        │
-   │── PUT /projects/5 ──────►│                        │
-   │   If-Match: "x"          │── verify_etag ────────►│
-   │   {name: "new"}          │◄── :ok ────────────────│
-   │                           │── update_project ─────►│
-   │◄── 200 {project} ────────│◄── {:ok, project} ─────│
+Browser              Channel          UserSession          ProjectSession     Rust NIF
+   │                    │                  │                     │               │
+   │── start_playback ─►│                  │                     │               │
+   │                    │── start ────────►│                     │               │
+   │                    │                  │── mix_chunk(200ms) ─►│               │
+   │                    │                  │                     │── mix_chunk ──►│
+   │                    │                  │                     │◄── binary ────│
+   │                    │                  │◄── {:ok, binary} ───│               │
+   │◄── audio_frame ────│◄── send ────────│                     │               │
+   │                    │                  │                     │               │
+   │                    │   ┌── :push_chunk (50ms interval) ────┤               │
+   │                    │   │              │── mix_chunk(50ms) ──►│              │
+   │◄── audio_frame ────│◄──│── send ─────│                     │               │
+   │                    │   └──────────────┤                     │               │
 ```
 
 ## Network Topology

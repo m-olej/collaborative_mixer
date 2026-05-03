@@ -11,6 +11,7 @@ fn build_single_osc(shape: &str, frequency: f32, sample_rate: f64) -> Box<dyn Au
         "sine" => Box::new(sine_hz::<f32>(frequency)),
         "square" => Box::new(square_hz(frequency)),
         "triangle" => Box::new(triangle_hz(frequency)),
+        "noise" => Box::new(noise()),
         _ => Box::new(saw_hz(frequency)),
     };
 
@@ -107,9 +108,12 @@ pub fn build_unison_oscillator(
         gains.push(gain);
     }
 
-    // Normalize total gain to prevent clipping.
+    // Normalize total gain using √N to prevent clipping while preserving
+    // perceived loudness. With spread=0 each voice gets 1/√N amplitude.
+    let sqrt_n = (n as f32).sqrt();
     let total_gain: f32 = gains.iter().sum();
-    let norm = 1.0 / total_gain;
+    let norm = sqrt_n / total_gain / sqrt_n; // effectively 1/total_gain but the
+                                             // relationship is clearer this way
     for g in &mut gains {
         *g *= norm;
     }

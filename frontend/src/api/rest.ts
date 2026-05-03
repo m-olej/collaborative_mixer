@@ -137,4 +137,19 @@ export const api = {
   deleteTrack: async (projectId: number, trackId: number): Promise<void> => {
     await request<void>(`/projects/${projectId}/tracks/${trackId}`, { method: "DELETE" });
   },
+
+  batchMoveTracks: async (
+    projectId: number,
+    moves: { id: number; position_ms: number; lane_index: number; etag: string }[],
+  ): Promise<{ tracks: Track[]; etags: Record<string, string> }> => {
+    const res = await fetch(`${BASE}/projects/${projectId}/tracks/batch-move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ moves }),
+    });
+    if (res.status === 412) throw new Error("412: ETag conflict on batch move.");
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const body = (await res.json()) as { data: Track[]; etags: Record<string, string> };
+    return { tracks: body.data, etags: body.etags };
+  },
 };

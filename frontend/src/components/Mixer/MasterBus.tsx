@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import type { Channel } from "phoenix";
+import { useSocketStore } from "../../store/useSocketStore";
+import { useTimelineStore } from "../../store/useTimelineStore";
 
 const DEBOUNCE_MS = 150;
 
@@ -21,7 +23,9 @@ interface MasterBusProps {
  */
 export function MasterBus({ masterVolume, playing, bpm, channel }: MasterBusProps) {
   const [volume, setVolume] = useState(masterVolume);
-  const [isPlaying, setIsPlaying] = useState(playing);
+  const isPlaying = useTimelineStore((s) => s.playing);
+  const playheadMs = useTimelineStore((s) => s.playheadMs);
+  const { pushStartPlayback, pushStopPlayback } = useSocketStore();
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleVolume = useCallback(
@@ -37,10 +41,12 @@ export function MasterBus({ masterVolume, playing, bpm, channel }: MasterBusProp
   );
 
   const handlePlayPause = useCallback(() => {
-    const next = !isPlaying;
-    setIsPlaying(next);
-    channel?.push("slider_update", { playing: next });
-  }, [isPlaying, channel]);
+    if (isPlaying) {
+      pushStopPlayback();
+    } else {
+      pushStartPlayback(playheadMs);
+    }
+  }, [isPlaying, playheadMs, pushStartPlayback, pushStopPlayback]);
 
   return (
     <div className="flex w-32 shrink-0 flex-col gap-3 rounded-lg border border-indigo-800 bg-gray-900 px-3 py-4">

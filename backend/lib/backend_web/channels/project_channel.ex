@@ -20,7 +20,7 @@ defmodule BackendWeb.ProjectChannel do
       ↓  (debounced, JSON)
   handle_in("patch_update", payload, socket)
       ↓  GenServer.call (sync — waits for NIF result)
-  SessionServer.patch_and_render(project_id, payload)
+  ProjectSession.patch_and_render(project_id, payload)
       ↓  Backend.DSP.render_synth(synth_params, 1.0)  [DirtyCpu NIF]
       ↓  returns {:ok, binary_frame}
   push(socket, "audio_buffer", {:binary, binary_frame})
@@ -30,7 +30,10 @@ defmodule BackendWeb.ProjectChannel do
   """
   use BackendWeb, :channel
 
-  alias Backend.DawSession.SessionServer
+  alias Backend.DawSession.ProjectSession
+  alias Backend.DawSession.UserSessionSupervisor
+  alias Backend.DawSession.UserSession
+  alias Backend.DawSession.VoiceStreamer
   alias BackendWeb.Presence
 
   @impl true
@@ -39,8 +42,8 @@ defmodule BackendWeb.ProjectChannel do
       {id, ""} ->
         # Ensure a session GenServer is running for this project.
         # `ensure_started` is idempotent: returns the existing PID if already up.
-        SessionServer.ensure_started(id)
-        state = SessionServer.get_state(id)
+        ProjectSession.ensure_started(id)
+        state = ProjectSession.get_state(id)
 
         # Extract user identity from join params (ephemeral, stored in localStorage).
         username = Map.get(payload, "username", "Anonymous")
@@ -51,6 +54,12 @@ defmodule BackendWeb.ProjectChannel do
           |> assign(:project_id, id)
           |> assign(:username, username)
           |> assign(:user_color, color)
+          |> assign(:active_voices, %{})
+
+        # Start a UserSession for this user.
+        UserSessionSupervisor.start_user_session(id, username)
+        UserSession.set_channel_pid(id, username, self())
+        ProjectSession.register_user(id, username, self())
 
         # Track presence after join (must be done via send to self).
         send(self(), :after_join)
@@ -75,7 +84,7 @@ defmodule BackendWeb.ProjectChannel do
    "resonance": 0.7, "drive": 1.2, "volume": 0.8}
   ```
 
-  The SessionServer merges the params, calls the DirtyCpu Rust NIF, and returns
+  The ProjectSession merges the params, calls the DirtyCpu Rust NIF, and returns
   the binary wire frame.  We push it back as a binary WebSocket message so the
   React client can decode it with zero-copy typed array views:
   ```js
@@ -86,12 +95,22 @@ defmodule BackendWeb.ProjectChannel do
   @impl true
   def handle_in("patch_update", payload, socket) do
     project_id = socket.assigns.project_id
+    view_id = Map.get(payload, "view_id")
+    # Strip view_id from params before forwarding to synth engine.
+    synth_params = Map.delete(payload, "view_id")
 
-    case SessionServer.patch_and_render(project_id, payload) do
+    case ProjectSession.patch_and_render(project_id, synth_params, view_id) do
       {:ok, binary_frame} ->
-        # Push the binary frame only to the requesting socket, not to peers.
-        # Audio buffers are per-client; every client renders its own sound.
         push(socket, "audio_buffer", {:binary, binary_frame})
+
+        # Broadcast the updated synth params to all peers.
+        if view_id do
+          broadcast_from!(socket, "design_view_update", %{
+            view_id: view_id,
+            synth_params: synth_params
+          })
+        end
+
         {:noreply, socket}
 
       {:error, reason} ->
@@ -99,11 +118,32 @@ defmodule BackendWeb.ProjectChannel do
     end
   end
 
+  # Sync synth parameters to server state without rendering audio.
+  # Used for live slider/knob changes where audio preview is not needed.
+  @impl true
+  def handle_in("sync_params", payload, socket) do
+    project_id = socket.assigns.project_id
+    view_id = Map.get(payload, "view_id")
+    synth_params = Map.delete(payload, "view_id")
+
+    ProjectSession.sync_params(project_id, synth_params, view_id)
+
+    # Broadcast to peers so their UI updates.
+    if view_id do
+      broadcast_from!(socket, "design_view_update", %{
+        view_id: view_id,
+        synth_params: synth_params
+      })
+    end
+
+    {:noreply, socket}
+  end
+
   @impl true
   def handle_in("slider_update", payload, socket) do
     project_id = socket.assigns.project_id
 
-    SessionServer.update_slider(project_id, payload)
+    ProjectSession.update_slider(project_id, payload)
 
     # Broadcast mixer slider change to all other clients in this session.
     broadcast_from!(socket, "slider_update", payload)
@@ -119,8 +159,9 @@ defmodule BackendWeb.ProjectChannel do
     project_id = socket.assigns.project_id
     notes = Map.get(payload, "notes", [])
     bar_duration_ms = Map.get(payload, "bar_duration_ms", 2000)
+    view_id = Map.get(payload, "view_id")
 
-    case SessionServer.render_bar(project_id, notes, bar_duration_ms) do
+    case ProjectSession.render_bar(project_id, notes, bar_duration_ms, view_id) do
       {:ok, binary_frame} ->
         push(socket, "bar_audio", {:binary, binary_frame})
         {:reply, {:ok, %{}}, socket}
@@ -131,24 +172,57 @@ defmodule BackendWeb.ProjectChannel do
   end
 
   # Handle a keyboard note preview request.
-  # Renders a long preview (3 s) of a single note at the given frequency.
-  # Uses a cast + Task pattern so multiple notes can render concurrently,
-  # giving polyphonic preview without blocking the GenServer.
-  # The rendered binary is sent back to this channel process via `handle_info`.
-  # The MIDI number is embedded in byte 1 of the binary frame for client-side
-  # correlation (so the client knows which key produced which audio).
+  # Spawns a streaming VoiceStreamer process that delivers audio chunks
+  # via burst & pace protocol (200 ms burst, then 50 ms ticks).
+  # The voice persists until key-up + ADSR release + effects tail decay.
   @impl true
-  def handle_in("note_preview", %{"frequency" => freq, "midi" => midi}, socket) do
+  def handle_in("note_preview", %{"frequency" => freq, "midi" => midi} = payload, socket) do
     project_id = socket.assigns.project_id
-    duration = 3.0
+    view_id = Map.get(payload, "view_id")
 
-    SessionServer.render_note_preview(project_id, freq, duration, midi, self())
+    # Kill any existing voice for this MIDI note (re-trigger).
+    socket = stop_voice(socket, midi)
+
+    # Get current synth params from session.
+    synth_params = ProjectSession.get_synth_params(project_id, view_id)
+
+    # Spawn a VoiceStreamer that will send us :voice_audio messages.
+    {:ok, voice_pid} = VoiceStreamer.start_link({self(), midi, synth_params, freq})
+    Process.monitor(voice_pid)
+
+    active_voices = Map.put(socket.assigns.active_voices, midi, voice_pid)
+    socket = assign(socket, :active_voices, active_voices)
+
+    # Broadcast key press to peers for collaborative key coloring.
+    broadcast_from!(socket, "key_down", %{
+      user: socket.assigns.username,
+      color: socket.assigns.user_color,
+      midi: midi
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("key_up", %{"midi" => midi}, socket) do
+    # Trigger release on the voice (it keeps streaming until envelope + effects done).
+    case Map.get(socket.assigns.active_voices, midi) do
+      nil -> :ok
+      pid -> VoiceStreamer.note_off(pid)
+    end
+
+    broadcast_from!(socket, "key_up", %{
+      user: socket.assigns.username,
+      midi: midi
+    })
+
     {:noreply, socket}
   end
 
   @impl true
   def handle_in("save_sample", %{"name" => name} = payload, socket) do
     project_id = socket.assigns.project_id
+    view_id = Map.get(payload, "view_id")
     genre = Map.get(payload, "genre")
     input_history = Map.get(payload, "input_history")
     # Ecto :map requires a map, but the frontend sends an array of notes.
@@ -172,7 +246,7 @@ defmodule BackendWeb.ProjectChannel do
 
     # Generate waveform peaks from the last rendered bar audio (if available).
     waveform_peaks =
-      case Backend.DawSession.SessionServer.get_last_bar_render(project_id) do
+      case Backend.DawSession.ProjectSession.get_last_bar_render(project_id, view_id) do
         {:ok, pcm_binary} when is_binary(pcm_binary) ->
           case Backend.DSP.generate_waveform_peaks(pcm_binary, 200) do
             peaks when is_list(peaks) ->
@@ -212,6 +286,59 @@ defmodule BackendWeb.ProjectChannel do
   end
 
   # ---------------------------------------------------------------------------
+  # Timeline playback events
+  # ---------------------------------------------------------------------------
+
+  @impl true
+  def handle_in("start_playback", %{"cursor_ms" => cursor_ms}, socket) do
+    project_id = socket.assigns.project_id
+    username = socket.assigns.username
+    view_id = "mixer"
+
+    UserSession.start_playback(project_id, username, cursor_ms, view_id)
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("stop_playback", _payload, socket) do
+    project_id = socket.assigns.project_id
+    username = socket.assigns.username
+
+    UserSession.stop_playback(project_id, username)
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("seek", %{"cursor_ms" => cursor_ms}, socket) do
+    project_id = socket.assigns.project_id
+    username = socket.assigns.username
+    view_id = "mixer"
+
+    UserSession.seek(project_id, username, cursor_ms, view_id)
+    {:noreply, socket}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Audio sync toggle
+  # ---------------------------------------------------------------------------
+
+  @impl true
+  def handle_in("set_sync", %{"view_id" => view_id, "enabled" => enabled}, socket) do
+    project_id = socket.assigns.project_id
+    username = socket.assigns.username
+
+    UserSession.set_sync(project_id, username, view_id, enabled)
+
+    broadcast_from!(socket, "sync_update", %{
+      user: username,
+      view_id: view_id,
+      enabled: enabled
+    })
+
+    {:reply, {:ok, %{view_id: view_id, enabled: enabled}}, socket}
+  end
+
+  # ---------------------------------------------------------------------------
   # Collaboration events — cursor tracking and selection
   # ---------------------------------------------------------------------------
 
@@ -222,6 +349,26 @@ defmodule BackendWeb.ProjectChannel do
       color: socket.assigns.user_color,
       x: x,
       y: y
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("tracks_dragging", %{"track_ids" => track_ids}, socket) do
+    broadcast_from!(socket, "tracks_dragging", %{
+      user: socket.assigns.username,
+      color: socket.assigns.user_color,
+      track_ids: track_ids
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_in("tracks_drag_end", _payload, socket) do
+    broadcast_from!(socket, "tracks_drag_end", %{
+      user: socket.assigns.username
     })
 
     {:noreply, socket}
@@ -254,7 +401,7 @@ defmodule BackendWeb.ProjectChannel do
     {:noreply, socket}
   end
 
-  # Receive mixer audio frames from the SessionServer (type byte 1) and forward
+  # Receive mixer audio frames from the ProjectSession (type byte 1) and forward
   # them as binary WebSocket messages to this client.
   @impl true
   def handle_info({:audio_frame, binary_frame}, socket) do
@@ -262,16 +409,93 @@ defmodule BackendWeb.ProjectChannel do
     {:noreply, socket}
   end
 
-  # Receive note preview audio from a render Task.
+  # Receive streaming voice audio from VoiceStreamer.
   # Embed the MIDI number in byte 1 (padding area) of the binary frame so the
-  # client can correlate the response with the originating key press.
+  # client can correlate chunks with the originating key press.
+  @impl true
+  def handle_info({:voice_audio, midi, binary_frame}, socket) do
+    <<type, _pad1, pad2, pad3, rest::binary>> = binary_frame
+    midi_byte = min(max(midi, 0), 127)
+    patched = <<type, midi_byte::8, pad2, pad3, rest::binary>>
+    push(socket, "voice_audio", {:binary, patched})
+    {:noreply, socket}
+  end
+
+  # Voice has finished (envelope done + effects tail silent).
+  # Clean up from active voices map and notify the client.
+  @impl true
+  def handle_info({:voice_done, midi}, socket) do
+    active_voices = Map.delete(socket.assigns.active_voices, midi)
+    socket = assign(socket, :active_voices, active_voices)
+    push(socket, "voice_done", %{midi: midi})
+    {:noreply, socket}
+  end
+
+  # Handle VoiceStreamer process exits (normal or crash).
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, socket) do
+    # Remove from active_voices if it's a voice process.
+    active_voices =
+      socket.assigns.active_voices
+      |> Enum.reject(fn {_midi, voice_pid} -> voice_pid == pid end)
+      |> Map.new()
+
+    {:noreply, assign(socket, :active_voices, active_voices)}
+  end
+
+  # Legacy: Receive note preview audio from old render Task (backward compat).
   @impl true
   def handle_info({:note_audio, midi, binary_frame}, socket) do
-    # Patch byte 1 of the binary frame with the MIDI number.
     <<type, _pad1, pad2, pad3, rest::binary>> = binary_frame
     midi_byte = min(max(midi, 0), 127)
     patched = <<type, midi_byte::8, pad2, pad3, rest::binary>>
     push(socket, "note_audio", {:binary, patched})
     {:noreply, socket}
+  end
+
+  # Receive timeline audio frames from UserSession (burst & pace protocol).
+  @impl true
+  def handle_info({:deliver_audio, _view_id, binary_frame}, socket) do
+    push(socket, "audio_frame", {:binary, binary_frame})
+    {:noreply, socket}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Cleanup
+  # ---------------------------------------------------------------------------
+
+  @impl true
+  def terminate(_reason, socket) do
+    if Map.has_key?(socket.assigns, :project_id) do
+      project_id = socket.assigns.project_id
+      username = socket.assigns.username
+
+      # Stop all active voice streamers.
+      for {_midi, pid} <- Map.get(socket.assigns, :active_voices, %{}) do
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      end
+
+      ProjectSession.unregister_user(project_id, username)
+      UserSessionSupervisor.stop_user_session(project_id, username)
+    end
+
+    :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
+  # Stop an existing voice for a given MIDI note (re-trigger support).
+  defp stop_voice(socket, midi) do
+    case Map.get(socket.assigns.active_voices, midi) do
+      nil ->
+        socket
+
+      pid ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+        active_voices = Map.delete(socket.assigns.active_voices, midi)
+        assign(socket, :active_voices, active_voices)
+    end
   end
 end

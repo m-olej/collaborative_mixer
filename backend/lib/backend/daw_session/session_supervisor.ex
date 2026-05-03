@@ -11,9 +11,9 @@ defmodule Backend.DawSession.SessionSupervisor do
     DynamicSupervisor.init(strategy: :one_for_one)
   end
 
-  @doc "Start a SessionServer child for the given project."
+  @doc "Start a ProjectSession child for the given project."
   def start_session(project_id) do
-    child_spec = {Backend.DawSession.SessionServer, project_id}
+    child_spec = {Backend.DawSession.ProjectSession, project_id}
     DynamicSupervisor.start_child(__MODULE__, child_spec)
   end
 end

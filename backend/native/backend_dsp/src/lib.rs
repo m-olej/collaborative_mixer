@@ -20,7 +20,7 @@
 //! BEAM owns it.  There is no intermediate OS-heap allocation visible to the
 //! GC.
 
-use rustler::{Binary, Env, NifResult, OwnedBinary};
+use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc};
 
 // Sub-modules — each has a single responsibility.
 mod atoms {
@@ -47,9 +47,20 @@ mod mixer;
 /// Waveform peak generation for timeline thumbnail display.
 mod waveform;
 
-use engine::{render, render_pcm_only, SAMPLE_RATE};
+/// Timeline playback engine: mmap store, interval tree, chunk mixer, decoder.
+/// Completely independent from the synthesizer pipeline above.
+mod timeline;
+
+/// Stateful synthesizer voice for streaming note preview.
+mod voice;
+
+use engine::{render, render_pcm_only, render_voice_with_release, SAMPLE_RATE};
 use interface::build_synth_frame;
 use state::SynthState;
+use timeline::{interval_tree::ClipInfo, ProjectEngine, ProjectEngineResource, TrackParams};
+use voice::{SynthVoice, SynthVoiceResource};
+
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // NIFs
@@ -131,13 +142,17 @@ fn render_synth<'a>(env: Env<'a>, state: SynthState, duration_secs: f64) -> NifR
 /// Returns a binary containing f32 LE PCM samples (no header, no FFT).
 /// The Elixir caller spawns one Task per voice, each calling this NIF
 /// concurrently.  The results are then mixed by `mix_voices/3`.
+///
+/// `note_duration_secs` controls when note-off fires; the total rendered
+/// PCM includes the ADSR release tail.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn render_voice_pcm<'a>(
     env: Env<'a>,
     state: SynthState,
     duration_secs: f64,
 ) -> NifResult<Binary<'a>> {
-    let pcm = render_pcm_only(&state, SAMPLE_RATE, duration_secs as f32);
+    let release_secs = state.amp_release_ms / 1000.0;
+    let pcm = render_voice_with_release(&state, SAMPLE_RATE, duration_secs as f32, release_secs);
 
     let byte_len = pcm.len() * 4;
     let mut owned = OwnedBinary::new(byte_len).ok_or(rustler::Error::BadArg)?;
@@ -217,8 +232,256 @@ fn generate_waveform_peaks<'a>(
     Ok(peaks)
 }
 
+// ===========================================================================
+// Streaming voice NIFs — stateful ResourceArc-backed synth voices.
+// ===========================================================================
+
+/// Create a new SynthVoice for streaming note preview.
+///
+/// Returns a `ResourceArc<SynthVoiceResource>` that persists across render
+/// calls, holding all DSP state (oscillators, envelopes, filters, effects).
+///
+/// This is cheap — just allocates the DSP structs.  Not DirtyCpu.
+#[rustler::nif]
+fn create_synth_voice(
+    state: SynthState,
+    frequency: f64,
+) -> NifResult<ResourceArc<SynthVoiceResource>> {
+    let voice = SynthVoice::new(&state, frequency as f32, SAMPLE_RATE);
+    Ok(ResourceArc::new(SynthVoiceResource(Mutex::new(voice))))
+}
+
+/// Render the next `num_samples` from a persistent voice.
+///
+/// Returns a binary wire frame (header + FFT + PCM) ready for WebSocket push.
+/// Executes in < 1 ms for 50 ms chunks (2205 samples) — normal scheduler is fine.
+#[rustler::nif]
+fn render_voice_chunk<'a>(
+    env: Env<'a>,
+    voice_resource: ResourceArc<SynthVoiceResource>,
+    num_samples: u64,
+) -> NifResult<Binary<'a>> {
+    let mut voice = voice_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("voice lock poisoned")))?;
+
+    let frame = voice.render_chunk(num_samples as usize);
+
+    let mut owned = OwnedBinary::new(frame.len()).ok_or(rustler::Error::BadArg)?;
+    owned.as_mut_slice().copy_from_slice(&frame);
+    Ok(owned.release(env))
+}
+
+/// Trigger the release phase on a voice (key-up event).
+///
+/// After this call, the voice continues rendering the ADSR release tail
+/// and effects decay until `voice_is_done` returns true.
+#[rustler::nif]
+fn voice_note_off(voice_resource: ResourceArc<SynthVoiceResource>) -> NifResult<rustler::Atom> {
+    let mut voice = voice_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("voice lock poisoned")))?;
+
+    voice.note_off();
+    Ok(atoms::ok())
+}
+
+/// Check if a voice has finished (envelope done AND effects tail silent).
+///
+/// Returns `true` when the voice can be safely destroyed.
+#[rustler::nif]
+fn voice_is_done(voice_resource: ResourceArc<SynthVoiceResource>) -> NifResult<bool> {
+    let voice = voice_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("voice lock poisoned")))?;
+
+    Ok(voice.is_done())
+}
+
+// ===========================================================================
+// Timeline playback NIFs — completely separate pipeline from synth above.
+// ===========================================================================
+
+/// Allocate a new ProjectEngine for a project.
+///
+/// Returns a `ResourceArc` that Elixir holds as an opaque term.  The engine
+/// is empty; tracks are loaded via `decode_and_load_track`.
+///
+/// This is cheap — just allocates the structs.  Not DirtyCpu.
+#[rustler::nif]
+fn init_engine(_project_id: u64) -> NifResult<ResourceArc<ProjectEngineResource>> {
+    let engine = ProjectEngine::new(48_000);
+    Ok(ResourceArc::new(ProjectEngineResource(Mutex::new(engine))))
+}
+
+/// Decode raw audio bytes and load them into the engine's mmap store + timeline.
+///
+/// # Arguments (from Elixir)
+/// * `engine_resource` – `ResourceArc<ProjectEngineResource>` from `init_engine`.
+/// * `track_id`        – integer ID matching the DB track.
+/// * `audio_bytes`     – raw audio file bytes (WAV/MP3/FLAC from S3).
+/// * `clip_start_ms`   – where this clip starts on the global timeline.
+/// * `source_offset_ms`– offset into the decoded audio (usually 0).
+///
+/// # DirtyCpu — mandatory
+/// File decoding + resampling can take hundreds of milliseconds.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn decode_and_load_track<'a>(
+    engine_resource: ResourceArc<ProjectEngineResource>,
+    track_id: u64,
+    audio_bytes: Binary<'a>,
+    clip_start_ms: u64,
+    source_offset_ms: u64,
+) -> NifResult<rustler::Atom> {
+    let mut engine = engine_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("engine lock poisoned")))?;
+
+    // Decode audio bytes → tempfile with f32 LE PCM at engine sample rate.
+    let (tmpfile, total_samples) =
+        timeline::decoder::decode_to_tempfile(audio_bytes.as_slice(), engine.sample_rate)
+            .map_err(|e| rustler::Error::Term(Box::new(format!("decode error: {e}"))))?;
+
+    // Memory-map the tempfile and insert into the store.
+    engine
+        .store
+        .insert(track_id, tmpfile, total_samples)
+        .map_err(|e| rustler::Error::Term(Box::new(format!("mmap error: {e}"))))?;
+
+    // Calculate clip end based on total decoded samples.
+    let duration_ms = (total_samples as u64 * 1000) / engine.sample_rate as u64;
+    let clip_end_ms = clip_start_ms + duration_ms;
+
+    // Insert into the interval tree.
+    engine.timeline.insert(ClipInfo {
+        clip_id: track_id,
+        track_id,
+        start_ms: clip_start_ms,
+        end_ms: clip_end_ms,
+        source_offset_ms,
+    });
+
+    Ok(atoms::ok())
+}
+
+/// Atomically replace the entire timeline with a new set of clips.
+///
+/// Called after track add/remove/move operations so the interval tree
+/// matches the database state.
+///
+/// # Arguments
+/// * `clips` – list of maps: `%{clip_id, track_id, start_ms, end_ms, source_offset_ms}`.
+#[rustler::nif]
+fn rebuild_timeline(
+    engine_resource: ResourceArc<ProjectEngineResource>,
+    clips: Vec<ClipInfoNif>,
+) -> NifResult<rustler::Atom> {
+    let mut engine = engine_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("engine lock poisoned")))?;
+
+    let clip_vec: Vec<ClipInfo> = clips
+        .into_iter()
+        .map(|c| ClipInfo {
+            clip_id: c.clip_id,
+            track_id: c.track_id,
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+            source_offset_ms: c.source_offset_ms,
+        })
+        .collect();
+
+    engine.timeline.rebuild(clip_vec);
+    Ok(atoms::ok())
+}
+
+/// Update per-track mixing parameters (volume, mute, pan).
+///
+/// Called on every slider_update.  Fast path — no DirtyCpu needed.
+#[rustler::nif]
+fn set_track_params(
+    engine_resource: ResourceArc<ProjectEngineResource>,
+    params: Vec<TrackParamUpdateNif>,
+) -> NifResult<rustler::Atom> {
+    let mut engine = engine_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("engine lock poisoned")))?;
+
+    for p in params {
+        engine.params.insert(
+            p.track_id,
+            TrackParams {
+                volume: p.volume,
+                muted: p.muted,
+                pan: p.pan,
+            },
+        );
+    }
+
+    Ok(atoms::ok())
+}
+
+/// Mix a chunk of timeline audio at the given playhead position.
+///
+/// Returns a complete wire frame (type byte 1) with FFT + PCM.
+///
+/// For sparse timelines with few overlapping clips this completes in < 1 ms
+/// (regular scheduler is fine).  For dense timelines we mark DirtyCpu.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mix_chunk<'a>(
+    env: Env<'a>,
+    engine_resource: ResourceArc<ProjectEngineResource>,
+    start_ms: u64,
+    duration_ms: u32,
+) -> NifResult<Binary<'a>> {
+    let engine = engine_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("engine lock poisoned")))?;
+
+    let frame = timeline::chunk_mixer::mix_chunk(&engine, start_ms, duration_ms);
+
+    let mut owned = OwnedBinary::new(frame.len()).ok_or(rustler::Error::BadArg)?;
+    owned.as_mut_slice().copy_from_slice(&frame);
+    Ok(owned.release(env))
+}
+
+// ── NIF helper structs (Rustler NifMap decode from Elixir maps) ────────────
+
+/// Elixir map for `rebuild_timeline/2` clip list.
+#[derive(rustler::NifMap)]
+struct ClipInfoNif {
+    clip_id: u64,
+    track_id: u64,
+    start_ms: u64,
+    end_ms: u64,
+    source_offset_ms: u64,
+}
+
+/// Elixir map for `set_track_params/2` parameter list.
+#[derive(rustler::NifMap)]
+struct TrackParamUpdateNif {
+    track_id: u64,
+    volume: f32,
+    muted: bool,
+    pan: f32,
+}
+
 // ---------------------------------------------------------------------------
 // NIF registration — must list every exported NIF exactly once.
 // The module name must match `Backend.DSP` (the Elixir module using Rustler).
 // ---------------------------------------------------------------------------
-rustler::init!("Elixir.Backend.DSP");
+rustler::init!("Elixir.Backend.DSP", load = on_load);
+
+/// Called once when the NIF library is loaded.  Registers ResourceArc types.
+fn on_load(env: Env, _info: rustler::Term) -> bool {
+    rustler::resource!(ProjectEngineResource, env);
+    rustler::resource!(SynthVoiceResource, env);
+    true
+}

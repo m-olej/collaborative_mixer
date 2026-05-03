@@ -81,6 +81,8 @@ export interface MixerState {
   master_volume: number;
   playing: boolean;
   playhead_ms: number;
+  /** Per-user design views (populated after Phase 2). */
+  design_views?: Record<string, { synth_params: SynthParams }>;
 }
 
 // --- Binary frame ---
@@ -102,10 +104,10 @@ export function decodeAudioFrame(buffer: ArrayBuffer): AudioFrame {
 // ---------------------------------------------------------------------------
 
 /** Waveform shapes supported by the Rust DSP engine. */
-export type OscShape = "saw" | "sine" | "square" | "triangle";
+export type OscShape = "saw" | "sine" | "square" | "triangle" | "noise";
 
 /** Filter topology variants. */
-export type FilterTypeVariant = "svf" | "moog";
+export type FilterTypeVariant = "svf" | "moog" | "highpass" | "bandpass";
 
 /** LFO waveform shapes. */
 export type LfoShape = "sine" | "triangle" | "square" | "saw";
@@ -157,6 +159,19 @@ export interface SynthParams {
 
   // Amp
   volume: number;
+
+  // Amp Envelope (ADSR)
+  amp_attack_ms: number;
+  amp_decay_ms: number;
+  amp_sustain: number;
+  amp_release_ms: number;
+
+  // Filter Envelope (ADSR)
+  filter_attack_ms: number;
+  filter_decay_ms: number;
+  filter_sustain: number;
+  filter_release_ms: number;
+  filter_env_depth: number;
 }
 
 /** Default synth state matching the Rust `SynthState::default()`. */
@@ -182,6 +197,17 @@ export const DEFAULT_SYNTH_PARAMS: SynthParams = {
   reverb_decay: 0.3,
   reverb_mix: 0,
   volume: 0.8,
+  // Amp envelope
+  amp_attack_ms: 5,
+  amp_decay_ms: 100,
+  amp_sustain: 1,
+  amp_release_ms: 200,
+  // Filter envelope
+  filter_attack_ms: 10,
+  filter_decay_ms: 300,
+  filter_sustain: 0,
+  filter_release_ms: 200,
+  filter_env_depth: 0,
 };
 
 // ---------------------------------------------------------------------------

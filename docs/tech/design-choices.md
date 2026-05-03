@@ -92,7 +92,7 @@ This document explains the key engineering decisions made in the Cloud DAW proje
 - **Simplicity**: Elixir's `Task.async` + `Task.await_many` is 3 lines of code for fan-out/fan-in concurrency.
 - **Isolation**: If one voice render fails, it doesn't corrupt the others.
 
-**Note preview**: Uses `GenServer.cast` + `Task.start` instead of `call` + `Task.async`, so the GenServer is never blocked during keyboard preview. Multiple simultaneous key presses each spawn independent tasks.
+**Note preview (streaming voice)**: Uses a separate `VoiceStreamer` GenServer per active note (see #9). This is distinct from bar rendering — bar voices are stateless one-shot renders, while keyboard preview voices are stateful and stream continuously.
 
 ---
 
@@ -111,16 +111,20 @@ This document explains the key engineering decisions made in the Cloud DAW proje
 
 ---
 
-## 9. AudioBufferSourceNode for Note Preview
+## 9. Streaming Voice via AudioWorklet (Note Preview)
 
-**Decision**: Keyboard note previews play via individual `AudioBufferSourceNode` instances (one per held key) rather than through the AudioWorklet ring buffer.
+**Decision**: Keyboard note previews use a streaming architecture: each key press spawns a server-side `VoiceStreamer` GenServer that owns a persistent Rust `SynthVoice` (ResourceArc-backed). The voice streams 50 ms audio chunks to the client, which plays them via the AudioWorklet's additive `mixPcm()` method.
 
 **Rationale**:
-- **Per-note control**: Each source node has its own `GainNode`, allowing immediate fade-out on key release without affecting other notes.
-- **Variable duration**: Notes play for as long as the key is held (up to 3 seconds of pre-rendered audio). A ring buffer approach cannot stop individual notes.
-- **MIDI correlation**: The server embeds the MIDI note number in byte 1 of the wire frame. The client matches incoming audio to the correct key press.
+- **True ADSR lifecycle**: The voice persists across multiple render calls, so ADSR envelopes (attack → decay → sustain → release → silence) evolve naturally over time. A one-shot pre-rendered approach cannot support variable-length sustain phases.
+- **Effect continuity**: Chorus delay buffer, reverb FDN state, and LFO phase carry over between chunks, producing smooth continuous effects instead of per-chunk artifacts.
+- **Voice culling**: The voice automatically terminates when both conditions are met: the amp ADSR envelope has completed its release phase AND the peak output falls below a silence threshold (0.00001). This allows effects tails (reverb/chorus) to decay naturally.
+- **Burst & pace protocol**: The initial 200 ms burst provides immediate audio feedback, then 50 ms chunks maintain a steady stream. This balances latency and CPU usage.
+- **Re-trigger support**: Pressing the same MIDI key while it's sounding kills the old `VoiceStreamer` and spawns a new one, providing clean re-trigger behavior.
 
-**Fade-out**: On note release, `gain.setTargetAtTime(0, now, 0.015)` applies a smooth ~45 ms exponential fade to avoid clicks.
+**Trade-off**: Each active voice is a separate BEAM process + Rust ResourceArc. With aggressive playing, this can spawn many processes. In practice, voice culling keeps the count manageable.
+
+**Previous approach (replaced)**: Originally used `AudioBufferSourceNode` instances — one per key — playing 3 seconds of pre-rendered audio with a client-side gain fade-out on key release. This was replaced because it could not support variable-length sustain or server-controlled ADSR release envelopes.
 
 ---
 
@@ -165,7 +169,7 @@ This document explains the key engineering decisions made in the Cloud DAW proje
 
 **Rationale**:
 - **Atom table exhaustion**: The BEAM has a fixed atom table (default 1,048,576 entries). Converting arbitrary user input to atoms can exhaust it, crashing the entire VM.
-- **Implementation**: `merge_synth_params/2` uses a hardcoded map of 21 known keys. `apply_slider_update/2` uses `when band in ["low", "mid", "high"]` guards before calling `String.to_existing_atom/1`.
+- **Implementation**: `merge_synth_params/2` uses a hardcoded map of 29 known keys. `apply_slider_update/2` uses `when band in ["low", "mid", "high"]` guards before calling `String.to_existing_atom/1`.
 
 ---
 

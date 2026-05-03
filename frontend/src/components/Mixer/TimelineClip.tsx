@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Track, Sample } from "../../types/daw";
 import { useTimelineStore } from "../../store/useTimelineStore";
+import { useSocketStore } from "../../store/useSocketStore";
 import { useCollabStore } from "../../store/useCollabStore";
 
 interface TimelineClipProps {
@@ -27,6 +28,12 @@ export function TimelineClip({
 }: TimelineClipProps) {
   const moveTrack = useTimelineStore((s) => s.moveTrack);
   const removeTrack = useTimelineStore((s) => s.removeTrack);
+  const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
+  const selectTrack = useTimelineStore((s) => s.selectTrack);
+  const toggleTrackSelection = useTimelineStore((s) => s.toggleTrackSelection);
+  const batchMoveSelectedTracks = useTimelineStore((s) => s.batchMoveSelectedTracks);
+  const draggingByUser = useTimelineStore((s) => s.draggingByUser);
+  const channel = useSocketStore((s) => s.channel);
   const { localSelection, setLocalSelection, remoteUsers } = useCollabStore();
   const waveformRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -60,28 +67,42 @@ export function TimelineClip({
     }
   }, [sample?.waveform_peaks]);
 
+  const isMultiSelected = selectedTrackIds.has(track.id);
+
   // Drag start
   const handleDragStart = useCallback(
     (e: React.DragEvent) => {
       setIsDragging(true);
+
+      // If this track isn't in the multi-selection, select it alone.
+      if (!selectedTrackIds.has(track.id)) {
+        selectTrack(track.id);
+      }
+
+      const draggedIds = selectedTrackIds.has(track.id)
+        ? Array.from(selectedTrackIds)
+        : [track.id];
+
       e.dataTransfer.setData(
         "application/x-clip-move",
-        JSON.stringify({ trackId: track.id, laneIndex: track.lane_index }),
+        JSON.stringify({ trackId: track.id, laneIndex: track.lane_index, selectedIds: draggedIds }),
       );
       e.dataTransfer.effectAllowed = "move";
+
+      // Broadcast drag start to peers.
+      channel?.push("tracks_dragging", { track_ids: draggedIds });
     },
-    [track.id, track.lane_index],
+    [track.id, track.lane_index, selectedTrackIds, selectTrack, channel],
   );
 
   // Drag end — calculate new position
   const handleDragEnd = useCallback(
     (e: React.DragEvent) => {
       setIsDragging(false);
+      channel?.push("tracks_drag_end", {});
+
       if (e.dataTransfer.dropEffect === "none") return;
 
-      // The parent lane's drop handler will compute the new position
-      // via the clip-move data transfer. We handle it here as well for
-      // intra-lane repositioning.
       const parentRect = (e.currentTarget as HTMLElement)
         .closest("[data-lane]")
         ?.getBoundingClientRect();
@@ -90,10 +111,17 @@ export function TimelineClip({
       const dropX = e.clientX - parentRect.left;
       const rawMs = dropX / pxPerMs;
       const positionMs = snapPositionMs(rawMs);
+      const deltaMs = positionMs - track.position_ms;
 
-      moveTrack(projectId, track.id, { position_ms: Math.round(positionMs) });
+      if (selectedTrackIds.size > 1 && selectedTrackIds.has(track.id)) {
+        // Batch move all selected tracks.
+        batchMoveSelectedTracks(projectId, deltaMs, 0);
+      } else {
+        // Single track move.
+        moveTrack(projectId, track.id, { position_ms: Math.round(positionMs) });
+      }
     },
-    [pxPerMs, snapPositionMs, moveTrack, projectId, track.id],
+    [pxPerMs, snapPositionMs, moveTrack, batchMoveSelectedTracks, projectId, track.id, track.position_ms, selectedTrackIds, channel],
   );
 
   // Context menu: delete
@@ -107,25 +135,40 @@ export function TimelineClip({
     [removeTrack, projectId, track.id, track.name],
   );
 
-  // Selection
+  // Selection (Ctrl+Click for multi, plain click for single)
   const isSelected = localSelection?.type === "timeline_clip" && localSelection.id === track.id;
 
-  const handleClick = useCallback(() => {
-    setLocalSelection(
-      isSelected ? null : { type: "timeline_clip", id: track.id },
-    );
-  }, [isSelected, setLocalSelection, track.id]);
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        toggleTrackSelection(track.id);
+      } else {
+        selectTrack(track.id);
+        setLocalSelection(
+          isSelected ? null : { type: "timeline_clip", id: track.id },
+        );
+      }
+    },
+    [isSelected, setLocalSelection, selectTrack, toggleTrackSelection, track.id],
+  );
 
   // Check if any remote user has this clip selected
   const remoteSelectors = Object.values(remoteUsers).filter(
     (u) => u.selection?.type === "timeline_clip" && u.selection.id === track.id,
   );
 
-  const borderColor = isSelected
+  // Check if any remote user is dragging this clip
+  const remoteDragColor = Object.values(draggingByUser).find(
+    (d) => d.track_ids.includes(track.id),
+  )?.color;
+
+  const borderColor = isMultiSelected || isSelected
     ? "#6366f1"
-    : remoteSelectors.length > 0
-      ? remoteSelectors[0].color
-      : "rgba(75,85,99,0.6)";
+    : remoteDragColor
+      ? remoteDragColor
+      : remoteSelectors.length > 0
+        ? remoteSelectors[0].color
+        : "rgba(75,85,99,0.6)";
 
   return (
     <div

@@ -40,6 +40,8 @@ interface SampleRecorderProps {
   /** Number of bars to record. */
   barCount: number;
   onBarCountChange: (n: number) => void;
+  /** Design view ID — identifies which synth params to use for rendering. */
+  viewId: string;
 }
 
 /** Handle exposed by SampleRecorder via forwardRef. */
@@ -63,6 +65,7 @@ export const SampleRecorder = forwardRef<SampleRecorderHandle, SampleRecorderPro
       onLocalSampleChange,
       barCount,
       onBarCountChange,
+      viewId,
     },
     ref,
   ) {
@@ -162,8 +165,9 @@ export const SampleRecorder = forwardRef<SampleRecorderHandle, SampleRecorderPro
     channel?.push("render_bar", {
       notes: notesRef.current,
       bar_duration_ms: totalMs,
+      view_id: viewId,
     });
-  }, [channel, totalMs]);
+  }, [channel, totalMs, viewId]);
 
   // ── Stop (abort) ──────────────────────────────────────────────────────────
   const handleStop = useCallback(() => {

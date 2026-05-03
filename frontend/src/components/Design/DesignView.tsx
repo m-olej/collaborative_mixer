@@ -1,7 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SynthControls } from "../SynthControls";
 import { useSocketStore } from "../../store/useSocketStore";
 import { useAudioWorklet } from "../../hooks/useAudioWorklet";
+import { useCollabStore } from "../../store/useCollabStore";
+import { useDesignViewStore } from "../../store/useDesignViewStore";
 import { SampleRecorder, type SampleRecorderHandle } from "./SampleRecorder";
 import { PianoRoll } from "./PianoRoll";
 import type { NoteEvent } from "../Keyboard";
@@ -35,6 +37,34 @@ interface SaveState {
 export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: initialCountIn }: DesignViewProps) {
   const channel = useSocketStore((s) => s.channel);
   const { feedPcm } = useAudioWorklet();
+
+  // ── Design view identity ──────────────────────────────────────────────────
+  const localUsername = useCollabStore((s) => s.localUser.username);
+  const remoteUsers = useCollabStore((s) => s.remoteUsers);
+  const myViewId = `design:${localUsername}`;
+  const activeViewId = useDesignViewStore((s) => s.activeViewId);
+  const setActiveView = useDesignViewStore((s) => s.setActiveView);
+  const ensureView = useDesignViewStore((s) => s.ensureView);
+  const designViews = useDesignViewStore((s) => s.designViews);
+
+  // Ensure own view exists and is active on mount.
+  useEffect(() => {
+    ensureView(myViewId);
+    if (!activeViewId) setActiveView(myViewId);
+  }, [myViewId, activeViewId, ensureView, setActiveView]);
+
+  const currentViewId = activeViewId || myViewId;
+  const isOwnView = currentViewId === myViewId;
+
+  // ── Audio sync toggle ─────────────────────────────────────────────────────
+  const syncEnabled = useDesignViewStore((s) => s.syncByView[myViewId] ?? false);
+  const setSync = useDesignViewStore((s) => s.setSync);
+
+  const handleSyncToggle = useCallback(() => {
+    const next = !syncEnabled;
+    setSync(myViewId, next);
+    channel?.push("set_sync", { view_id: myViewId, enabled: next });
+  }, [syncEnabled, setSync, myViewId, channel]);
 
   // ── Local sample state (lifted from SampleRecorder for PianoRoll access) ──
   const [localSample, setLocalSample] = useState<LocalSample | null>(null);
@@ -91,13 +121,65 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
   }, [channel, sampleName, genre, localSample]);
 
   return (
-    <div className="flex gap-6 p-6" style={{ maxWidth: "1400px", margin: "0 auto" }}>
+    <div className="flex flex-col gap-4 p-6" style={{ maxWidth: "1400px", margin: "0 auto" }}>
+      {/* ── Design View Tab Bar ──────────────────────────────────────── */}
+      <div className="flex items-center gap-1 rounded-lg bg-gray-900 px-2 py-1">
+        <DesignTab
+          label={localUsername}
+          viewId={myViewId}
+          active={currentViewId === myViewId}
+          isOwn
+          onClick={() => setActiveView(myViewId)}
+        />
+        {Object.keys(designViews)
+          .filter((vid) => vid !== myViewId && vid.startsWith("design:"))
+          .map((vid) => {
+            const uname = vid.replace("design:", "");
+            const remote = remoteUsers[uname];
+            return (
+              <DesignTab
+                key={vid}
+                label={uname}
+                viewId={vid}
+                active={currentViewId === vid}
+                color={remote?.color}
+                onClick={() => setActiveView(vid)}
+              />
+            );
+          })}
+
+        {/* Sync toggle */}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSyncToggle}
+            className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              syncEnabled
+                ? "bg-green-600/80 text-white hover:bg-green-500"
+                : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+            }`}
+            title={syncEnabled ? "Hearing all users' audio — click to hear only your own" : "Hearing only your audio — click to hear everyone"}
+          >
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${syncEnabled ? "bg-green-300" : "bg-gray-600"}`} />
+            {syncEnabled ? "Sync On" : "Sync Off"}
+          </button>
+        </div>
+      </div>
+
+      {!isOwnView && (
+        <div className="rounded bg-yellow-900/30 px-3 py-1.5 text-xs text-yellow-400">
+          Viewing <strong>{currentViewId.replace("design:", "")}</strong>'s design — read-only
+        </div>
+      )}
+
+      <div className="flex gap-6">
       {/* ── Left: synthesizer controls ──────────────────────────────────── */}
       <div className="min-w-0 flex-1">
         <SynthControls
           projectId={projectId}
-          onNoteOn={handleNoteOn}
-          onNoteOff={handleNoteOff}
+          viewId={currentViewId}
+          onNoteOn={isOwnView ? handleNoteOn : undefined}
+          onNoteOff={isOwnView ? handleNoteOff : undefined}
         />
       </div>
 
@@ -123,6 +205,7 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
           onLocalSampleChange={setLocalSample}
           barCount={barCount}
           onBarCountChange={setBarCount}
+          viewId={currentViewId}
         />
 
         {/* ── Piano Roll ─────────────────────────────────────────────── */}
@@ -203,6 +286,46 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
           </ol>
         </div>
       </div>
+      </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// DesignTab — individual tab in the design view tab bar
+// ---------------------------------------------------------------------------
+
+function DesignTab({
+  label,
+  active,
+  isOwn,
+  color,
+  onClick,
+}: {
+  label: string;
+  viewId: string;
+  active: boolean;
+  isOwn?: boolean;
+  color?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded px-3 py-1 text-xs font-medium transition-colors ${
+        active
+          ? "bg-indigo-600 text-white"
+          : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+      }`}
+    >
+      {!isOwn && (
+        <span
+          className="inline-block h-2 w-2 rounded-full"
+          style={{ backgroundColor: color ?? "#888" }}
+        />
+      )}
+      {isOwn ? "My Design" : label}
+    </button>
+  )
 }

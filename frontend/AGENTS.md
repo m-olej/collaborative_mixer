@@ -1,413 +1,300 @@
 # Cloud DAW — Frontend Agent Guide
 
-> React 19 + TypeScript SPA. Read root `AGENTS.md` first for cross-cutting concerns.
+> React + TypeScript SPA. Read root `AGENTS.md` first for cross-cutting concerns.
 > Run `npm run lint && npm run build` to validate work before finishing.
 
 ---
 
 ## 1. Technology Stack
 
-| Technology       | Version     | Role                                                      |
-|------------------|-------------|-----------------------------------------------------------|
-| React            | ^19.2.4     | UI component tree, slow state (metadata, track list)      |
-| TypeScript       | ~6.0.2      | Mandatory for all source files                            |
-| Vite             | ^8.0.4      | Dev server + production bundler                           |
-| Tailwind CSS     | ^4.2.2      | All styling (via `@tailwindcss/vite` plugin)              |
-| Zustand          | ^5.0.12     | Global state outside React lifecycle (socket, channel)    |
-| React Router DOM | ^7.14.1     | Client-side routing                                       |
-| phoenix (JS)     | ^1.8.5      | Phoenix Channel WebSocket client                          |
-| lucide-react     | ^1.8.0      | Icon set                                                  |
+| Technology       | Version   | Role                                                      |
+|------------------|-----------|-----------------------------------------------------------|
+| React            | ^19       | UI component tree; slow/structural state only             |
+| TypeScript       | ~5+       | Mandatory for all `src/` files                            |
+| Vite             | ^6+       | Dev server + production bundler                           |
+| Tailwind CSS     | ^4        | All styling via `@tailwindcss/vite` plugin                |
+| Zustand          | ^5        | Global state outside React lifecycle                      |
+| React Router DOM | ^7        | Client-side routing                                       |
+| phoenix (JS)     | ^1.8      | Phoenix Channel WebSocket client                          |
+| lucide-react     | latest    | Icon set                                                  |
 
 ---
 
-## 2. Project Structure
+## 2. Source Structure
 
 ```
-frontend/
-├── AGENTS.md
-├── index.html
-├── vite.config.ts          ← plugins: react(), tailwindcss()
-├── package.json
-├── tsconfig.app.json       ← strict TS config for src/
-└── src/
-    ├── main.tsx            ← React root, Router provider
-    ├── App.tsx             ← Top-level route layout (currently placeholder)
-    ├── App.css / index.css ← Base global styles (minimal; prefer Tailwind)
-    └── assets/             ← Static images, SVGs
-```
-
-**Planned structure to build:**
-
-```
-src/
-├── store/
-│   ├── useSocketStore.ts      ← Zustand: Phoenix socket + channel instances
-│   └── useProjectStore.ts     ← Zustand: project metadata, track list
-├── hooks/
-│   ├── useChannel.ts          ← Connect/join Phoenix channel
-│   └── useAudioWorklet.ts     ← AudioContext + AudioWorklet lifecycle
-├── workers/
-│   └── audio-processor.ts     ← AudioWorkletProcessor (runs in audio thread)
-├── components/
-│   ├── Mixer/
-│   │   ├── MixerLayout.tsx
-│   │   ├── TrackStrip.tsx     ← Volume fader, mute, EQ controls
-│   │   └── MasterBus.tsx
-│   ├── Visualizer/
-│   │   └── SpectrumCanvas.tsx ← Canvas FFT drawing
-│   ├── Transport/
-│   │   └── TransportBar.tsx   ← Play/Stop, BPM, playhead position
-│   └── Library/
-│       └── SampleBrowser.tsx  ← REST: paginated /api/samples
+frontend/src/
+├── main.tsx                 ← React root, Router provider
+├── App.tsx                  ← Top-level route layout
+├── App.css / index.css      ← Base global styles (prefer Tailwind)
 ├── api/
-│   └── rest.ts               ← Typed fetch wrappers for REST endpoints
-└── types/
-    └── daw.ts                ← Shared TypeScript types
+│   └── rest.ts              ← Typed fetch wrappers for all REST endpoints
+├── types/
+│   └── daw.ts               ← ALL shared TypeScript types + decode helpers
+├── store/
+│   ├── useSocketStore.ts    ← Zustand: Phoenix socket/channel + all WS event handlers
+│   ├── useProjectStore.ts   ← Zustand: project list, create, fetch
+│   ├── useDesignViewStore.ts ← Zustand: multi-user synth params, per-view state, audio sync
+│   ├── useTimelineStore.ts  ← Zustand: track list, ETag map, drag/drop ops
+│   └── useCollabStore.ts    ← Zustand: local user identity, remote cursors/selections
+├── hooks/
+│   ├── useAudioWorklet.ts   ← AudioContext + AudioWorklet lifecycle
+│   └── useMetronome.ts      ← Click-track metronome timing
+├── presets/
+│   └── synthPresets.ts      ← ~15 factory presets (Basses, Synths, Pads, Drums)
+├── components/
+│   ├── AudioVisualization.tsx     ← FFT spectrum + oscilloscope (forwardRef, rAF)
+│   ├── SpectrumCanvas.tsx         ← Standalone FFT-only canvas (rAF)
+│   ├── Keyboard.tsx               ← Piano keyboard with note_preview events, octave switching
+│   ├── AdsrEnvelope.tsx           ← Canvas ADSR visualization + time/level sliders
+│   ├── MixerView.tsx              ← Mixer tab container
+│   ├── ProjectList.tsx            ← Project selection screen
+│   ├── ProjectWorkspace.tsx       ← Top-level workspace; owns WebSocket connection
+│   ├── SynthControls.tsx          ← Synth parameter panel (29 params, presets, ADSR, keyboard)
+│   ├── Collaboration/
+│   │   └── CursorOverlay.tsx      ← SVG layer for remote user cursors
+│   ├── Design/
+│   │   ├── DesignView.tsx         ← Design tab container
+│   │   ├── PianoRoll.tsx          ← Note editor; emits render_bar events
+│   │   └── SampleRecorder.tsx     ← save_sample flow
+│   └── Mixer/
+│       ├── MasterBus.tsx          ← Master volume fader
+│       ├── SampleBrowser.tsx      ← REST: paginated /api/samples
+│       ├── Timeline.tsx           ← Timeline ruler + lane container
+│       ├── TimelineClip.tsx       ← Individual clip with waveform peaks
+│       ├── TimelineLane.tsx       ← Drag target lane
+│       └── TrackStrip.tsx         ← Per-track volume/mute/pan controls
+└── public/
+    └── audio-processor.js         ← AudioWorkletProcessor (served as static file)
 ```
 
 ---
 
-## 3. CRITICAL: Real-Time Rendering Rule (useRef vs useState)
+## 3. CRITICAL: Real-Time Rendering Rule
 
-This is the most important performance rule in the codebase.
-
-### FORBIDDEN — causes frame drops and audio glitches
-
-```tsx
-// ❌ NEVER use useState for data arriving at > 10 Hz
-const [volume, setVolume] = useState(0);
-channel.on("audio_update", (data) => setVolume(data.vol)); // triggers reconciliation
-```
-
-### REQUIRED — bypass Virtual DOM entirely
+**Never use `useState` or Zustand for data arriving at audio/video frame rate.**
+Use `useRef` + direct DOM / canvas mutation instead.
 
 ```tsx
-// ✅ ALWAYS use useRef + direct DOM mutation for real-time data
-const volumeBarRef = useRef<HTMLDivElement>(null);
+// ✅ CORRECT — forwardRef + useImperativeHandle pattern (AudioVisualization.tsx)
+export const AudioVisualization = forwardRef<AudioVisualizationHandle>(
+  function AudioVisualization(_props, ref) {
+    const fftDataRef = useRef<Uint8Array>(new Uint8Array(512));
+    useImperativeHandle(ref, () => ({
+      updateVisualization(fft: Uint8Array, pcm: Float32Array) {
+        fftDataRef.current = fft;   // direct write, no React update
+      },
+    }));
+    // draw loop driven by requestAnimationFrame, not by React
+  }
+);
 
-useEffect(() => {
-  channel.on("audio_update", (data) => {
-    if (volumeBarRef.current) {
-      volumeBarRef.current.style.height = `${data.vol * 100}%`;
-    }
-  });
-}, [channel]);
-
-return <div ref={volumeBarRef} className="volume-bar" />;
+// ❌ WRONG — triggers reconciliation on every audio frame
+const [fftData, setFftData] = useState(new Uint8Array(512));
+channel.on("audio_buffer", (buf) => setFftData(new Uint8Array(buf, 4, 512)));
 ```
 
-### What to use `useRef` for (all real-time)
-
+### What to use `useRef` + rAF for (all real-time)
+- FFT / oscilloscope canvas drawing (`AudioVisualization`, `SpectrumCanvas`)
 - Volume meter / VU meter bar heights
-- Playhead position (CSS `left` or `transform: translateX`)
-- FFT/spectrum canvas drawing
-- Any value updated from WebSocket binary frame handler
+- Playhead position animation
 
-### What to use `useState` / Zustand for (slow state)
-
-- Project name, BPM, track list structure
-- UI modals open/close
-- Sample library pagination cursor
-- Network connection status
+### What to use Zustand / `useState` for (slow state)
+- Project metadata, BPM, track list
+- UI modal open/close
+- Sample library pagination
+- WebSocket connection status
 
 ---
 
-## 4. Web Audio API: AudioWorklet
+## 4. Zustand Stores
 
-All audio playback MUST happen in an `AudioWorkletProcessor` running in the dedicated audio thread. Direct `AudioContext.createScriptProcessor` is deprecated and runs on the main thread — do not use it.
+### `useDesignViewStore` — multi-user synth state
+- Per-user isolation: each user has `viewId = "design:{username}"`.
+- `designViews: Record<string, { synth_params: SynthParams }>` — tracks all users' views.
+- `initFromServer(views)` — merges with `DEFAULT_SYNTH_PARAMS`.
+- `patchView(viewId, params)` — optimistic local update.
+- `handleRemoteUpdate(viewId, params)` — apply peer's changes.
+- `getActiveParams()` — returns current view's SynthParams.
+- `syncByView: Record<string, boolean>` — per-view audio sync toggles.
 
-### Architecture
+### `useSocketStore` — primary real-time hub
+- Owns the `Phoenix.Socket` and `Channel` instances.
+- `connect(projectId)` joins `"project:{id}"`, sets `mixerState` on OK.
+- Registers **all** WebSocket event handlers in one place:
+  - `audio_buffer`, `bar_audio`, `audio_frame`, `note_audio`, `voice_audio` → calls `onVisualizationData` callback
+  - `slider_update` → merges into `mixerState`
+  - `track_placed`, `track_moved`, `track_removed` → delegates to `useTimelineStore`
+  - `presence_state`, `presence_diff` → delegates to `useCollabStore`
+  - `cursor_move`, `selection_update` → delegates to `useCollabStore`
+- `setVisualizationCallback(cb)` — called by `ProjectWorkspace` to wire up `AudioVisualization`.
+- `pushCursorMove(x, y)` / `pushSelectionUpdate(sel)` — outgoing collaboration events.
 
-```
-WebSocket binary frame arrives
-        ↓
-Main thread: extract Float32Array from frame offset 516
-        ↓
-postMessage → SharedArrayBuffer (ring buffer) OR MessagePort to AudioWorklet
-        ↓
-AudioWorkletProcessor.process() fills output buffers from ring buffer
-        ↓
-Audio output
-```
+### `useTimelineStore`
+- Holds `tracks: Track[]` and `etags: Record<number, string>`.
+- `moveTrack` sends `PUT /api/projects/:id/tracks/:tid` with `If-Match` header; on 412 re-fetches.
+- `handleTrackPlaced/Moved/Removed` — called by `useSocketStore` for real-time sync.
+- Exposes `zoom` (px/ms) and `snapEnabled/snapResolution` for the timeline ruler.
 
-### AudioWorklet registration
+### `useCollabStore`
+- `localUser` — loaded from `localStorage` (`daw_username`, `daw_user_color`).
+- `remoteUsers` — map of `username → { color, cursor, selection }`.
+- Updated via Presence diff events from the socket.
+
+### `useProjectStore`
+- Thin wrapper around `api.listProjects()` / `api.createProject()`.
+
+---
+
+## 5. WebSocket Event Reference
+
+### Outgoing (client → server)
+
+| Event             | Payload                                           | Handler         |
+|-------------------|---------------------------------------------------|-----------------|
+| `patch_update`    | SynthParams map (string keys) + `view_id`         | SynthControls   |
+| `sync_params`     | SynthParams map (string keys) + `view_id`         | SynthControls (debounced 150ms, no render) |
+| `slider_update`   | `{track_id?, volume?, pan?, muted?, master_volume?}` | TrackStrip / MasterBus |
+| `render_bar`      | `{notes: RecordedNote[], bar_duration_ms, view_id}` | PianoRoll       |
+| `note_preview`    | `{frequency, midi, view_id}`                      | Keyboard        |
+| `key_up`          | `{midi}`                                          | Keyboard (triggers ADSR release on server) |
+| `save_sample`     | `{name, genre?, input_history?, bar_duration_ms, bar_count}` | SampleRecorder |
+| `cursor_move`     | `{x, y}`                                         | ProjectWorkspace (throttled 50 ms) |
+| `selection_update`| `CollabSelection \| {}`                          | useSocketStore  |
+| `ping`            | any                                               | health check    |
+
+### Incoming (server → client)
+
+| Event             | Payload                     | Consumer                       |
+|-------------------|-----------------------------|--------------------------------|
+| `audio_buffer`    | `ArrayBuffer` (binary, type 2) | useSocketStore → AudioVisualization |
+| `bar_audio`       | `ArrayBuffer` (binary, type 2) | useSocketStore → AudioVisualization |
+| `audio_frame`     | `ArrayBuffer` (binary, type 1) | useSocketStore → AudioVisualization |
+| `note_audio`      | `ArrayBuffer` (binary)      | useSocketStore → AudioVisualization (legacy) |
+| `voice_audio`     | `ArrayBuffer` (binary, MIDI in byte 1) | SynthControls → mixPcm() (polyphonic streaming) |
+| `voice_done`      | `{midi: number}`            | SynthControls (cleanup)        |
+| `design_view_update` | `{view_id, synth_params}` | useDesignViewStore             |
+| `slider_update`   | mixer params JSON           | useSocketStore → mixerState    |
+| `track_placed`    | `{track: Track}`            | useTimelineStore               |
+| `track_moved`     | `{track: Track}`            | useTimelineStore               |
+| `track_removed`   | `{track_id: number}`        | useTimelineStore               |
+| `presence_state`  | Presence map                | useCollabStore                 |
+| `presence_diff`   | `{joins, leaves}`           | useCollabStore                 |
+| `cursor_move`     | `{user, color, x, y}`       | useCollabStore                 |
+| `selection_update`| `{user, color, selection}`  | useCollabStore                 |
+
+---
+
+## 6. Binary Audio Frame Decoding
+
+All audio events (`audio_buffer`, `bar_audio`, `audio_frame`, `note_audio`) carry the same binary frame layout:
 
 ```ts
-// In useAudioWorklet.ts
+// From src/types/daw.ts
+export function decodeAudioFrame(buffer: ArrayBuffer): AudioFrame {
+  const fft = new Uint8Array(buffer, 4, 512);   // bytes 4–515
+  const pcm = new Float32Array(buffer, 516);    // bytes 516+
+  return { fft, pcm };
+}
+```
+
+This is already decoded inside `useSocketStore` before feeding the visualization. **Do not use `decodeAudioFrame` again in components** — receive `fft` and `pcm` directly via the `onVisualizationData` callback.
+
+---
+
+## 7. REST API Layer (`src/api/rest.ts`)
+
+All REST calls go through the typed `api` object. Key contracts:
+
+| Function                              | Method | Endpoint                                    | Notes                         |
+|---------------------------------------|--------|---------------------------------------------|-------------------------------|
+| `api.listProjects()`                  | GET    | `/api/projects`                             |                               |
+| `api.getProject(id)`                  | GET    | `/api/projects/:id`                         | Returns `{project, etag}`     |
+| `api.createProject(name, bpm)`        | POST   | `/api/projects`                             |                               |
+| `api.updateProject(id, data, etag)`   | PUT    | `/api/projects/:id`                         | Requires ETag; throws on 412/428 |
+| `api.deleteProject(id)`               | DELETE | `/api/projects/:id`                         |                               |
+| `api.listSamples(page, limit)`        | GET    | `/api/samples?page=&limit=`                 | Returns `PaginatedResponse`   |
+| `api.deleteSample(id)`                | DELETE | `/api/samples/:id`                          |                               |
+| `api.startExport(projectId, token)`   | POST   | `/api/projects/:id/exports?token=`          | Returns 202 or 303            |
+| `api.listTracks(projectId)`           | GET    | `/api/projects/:id/tracks`                  |                               |
+| `api.createTrack(projectId, data)`    | POST   | `/api/projects/:id/tracks`                  | Returns `{track, etag}`       |
+| `api.updateTrack(pId, tId, data, etag)` | PUT  | `/api/projects/:id/tracks/:tid`             | Requires ETag; throws on 412/428 |
+| `api.deleteTrack(projectId, trackId)` | DELETE | `/api/projects/:id/tracks/:tid`             |                               |
+
+The `request<T>()` helper throws on non-2xx, returns `undefined` on 204/202 with no body.
+
+---
+
+## 8. Key Types (`src/types/daw.ts`)
+
+```ts
+// REST resources
+Project, Track, Sample, Export, PaginatedResponse<T>
+
+// WebSocket mixer state (received on channel join)
+MixerState { project_id, tracks: Record<string, TrackMixerState>, master_volume, playing, playhead_ms }
+TrackMixerState { volume, muted, solo, pan, eq: EqSettings }
+
+// Synth parameters (29 fields — matches Rust SynthState exactly)
+SynthParams {
+  osc_shape, frequency,
+  unison_voices, unison_detune, unison_spread,
+  cutoff, resonance, filter_type,
+  drive, distortion_type, distortion_amount,
+  lfo_rate, lfo_depth, lfo_shape, lfo_target,
+  chorus_rate, chorus_depth, chorus_mix,
+  reverb_decay, reverb_mix,
+  volume,
+  amp_attack_ms, amp_decay_ms, amp_sustain, amp_release_ms,
+  filter_attack_ms, filter_decay_ms, filter_sustain, filter_release_ms, filter_env_depth
+}
+DEFAULT_SYNTH_PARAMS — mirrors Rust SynthState::default()
+
+// Collaboration
+CollabUser { username, color }
+RemoteUser { username, color, cursor: {x,y} | null, selection: CollabSelection | null }
+CollabSelection { trackId, startMs, endMs }
+
+// Timeline
+SnapResolution = "bar" | "beat" | "sixteenth"
+WaveformPeak { min, max }   // used by TimelineClip for thumbnail
+RecordedNote { midi, note, frequency, start_ms, end_ms }
+```
+
+---
+
+## 9. Audio Worklet
+
+All audio playback runs in an `AudioWorkletProcessor` (`public/audio-processor.js`, served as static file).
+
+```ts
+// useAudioWorklet.ts bootstrap pattern
 const ctx = new AudioContext({ sampleRate: 44100 });
 await ctx.audioWorklet.addModule('/audio-processor.js');
 const node = new AudioWorkletNode(ctx, 'cloud-daw-processor');
 node.connect(ctx.destination);
 ```
 
-### AudioWorkletProcessor (workers/audio-processor.ts)
-
-```ts
-// This file runs in AudioWorkletGlobalScope — no DOM access, no fetch, no imports
-class CloudDawProcessor extends AudioWorkletProcessor {
-  private buffer: Float32Array[] = [];
-
-  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
-    // Dequeue from ring buffer and fill outputs[0][0]
-    return true; // keep alive
-  }
-}
-registerProcessor('cloud-daw-processor', CloudDawProcessor);
-```
-
-**Rules:**
-- `audio-processor.ts` must be compiled separately and served as a static file from `public/`.
-- No React, no Zustand, no imports from `node_modules` in the worklet file.
-- Communicate from main thread to worklet only via `node.port.postMessage()` or `SharedArrayBuffer`.
+Rules:
+- `audio-processor.js` has no imports from `node_modules` — it runs in `AudioWorkletGlobalScope`.
+- Feed PCM to the worklet via `node.port.postMessage(pcm)` only — no shared state with React.
+- Two playback modes: `feedPcm()` for sequential playback, `mixPcm()` for additive polyphonic mixing (used by voice streaming).
+- The `useAudioWorklet` hook manages `AudioContext` lifecycle (create on first user gesture, suspend/resume on tab visibility).
 
 ---
 
-## 5. Canvas API: FFT Spectrum Visualizer
+## 10. Collaboration Features
 
-The FFT data arrives as `Uint8Array(512)` from bytes 4–515 of each binary frame.
-
-```tsx
-// components/Visualizer/SpectrumCanvas.tsx
-const canvasRef = useRef<HTMLCanvasElement>(null);
-const animFrameRef = useRef<number>(0);
-const fftDataRef = useRef<Uint8Array>(new Uint8Array(512));
-
-// Called from WebSocket handler — no state, just update the ref
-function onAudioFrame(buffer: ArrayBuffer) {
-  fftDataRef.current = new Uint8Array(buffer, 4, 512);
-}
-
-// Draw loop — never driven by React re-renders
-function draw() {
-  const canvas = canvasRef.current;
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d')!;
-  const data = fftDataRef.current;
-  const W = canvas.width, H = canvas.height;
-  const barWidth = W / data.length;
-
-  ctx.clearRect(0, 0, W, H);
-  data.forEach((val, i) => {
-    const barH = (val / 255) * H;
-    ctx.fillStyle = `hsl(${(i / data.length) * 240}, 80%, 60%)`;
-    ctx.fillRect(i * barWidth, H - barH, barWidth - 1, barH);
-  });
-
-  animFrameRef.current = requestAnimationFrame(draw);
-}
-
-useEffect(() => {
-  animFrameRef.current = requestAnimationFrame(draw);
-  return () => cancelAnimationFrame(animFrameRef.current);
-}, []);
-```
+- **Presence**: tracked via Phoenix Presence. On join, `presence_state` provides the full map; `presence_diff` delivers incremental updates. User identity (`username`, `color`) is set in `useCollabStore` and persisted to `localStorage`.
+- **Cursors**: `ProjectWorkspace` throttles `mousemove` to 50 ms intervals before pushing `cursor_move`. `CursorOverlay` renders SVG cursor dots for each `remoteUser`.
+- **Selections**: `useCollabStore.localSelection` is pushed via `pushSelectionUpdate`; remote selections are rendered per component.
 
 ---
 
-## 6. Phoenix Channel Integration
-
-Use the `phoenix` npm package (`@types/phoenix` for types).
-
-### Zustand store (store/useSocketStore.ts)
-
-```ts
-import { Socket, Channel } from 'phoenix';
-import { create } from 'zustand';
-
-interface SocketStore {
-  socket: Socket | null;
-  channel: Channel | null;
-  connect: (projectId: string) => void;
-  disconnect: () => void;
-}
-
-export const useSocketStore = create<SocketStore>((set, get) => ({
-  socket: null,
-  channel: null,
-  connect: (projectId) => {
-    const socket = new Socket('/socket', {});
-    socket.connect();
-    const channel = socket.channel(`project:${projectId}`, {});
-    channel.join()
-      .receive('ok', (initState) => { /* populate slow state */ })
-      .receive('error', console.error);
-    set({ socket, channel });
-  },
-  disconnect: () => {
-    get().socket?.disconnect();
-    set({ socket: null, channel: null });
-  },
-}));
-```
-
-### Binary message handling
-
-```ts
-channel.onMessage = (event, payload, ref) => {
-  if (payload?.constructor === ArrayBuffer) {
-    const msgType = new Uint8Array(payload)[0]; // byte 0 = message type
-    if (msgType === 1) handleAudioFrame(payload);
-  }
-  return payload;
-};
-```
-
-### Text control messages (JSON)
-
-```ts
-// Send slider update
-channel.push('slider_update', { track_id: '123', volume: 0.8 });
-
-// Receive state broadcast
-channel.on('state_update', (payload) => {
-  useProjectStore.getState().applyStateUpdate(payload);
-});
-```
-
----
-
-## 7. REST API Client (api/rest.ts)
-
-All REST calls are typed `fetch` wrappers. Base URL is `/api`.
-
-### ETag-aware project update
-
-```ts
-async function updateProject(id: string, data: Partial<Project>, etag: string): Promise<Project> {
-  const res = await fetch(`/api/projects/${id}`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'If-Match': etag,
-    },
-    body: JSON.stringify(data),
-  });
-  if (res.status === 412) throw new Error('Conflict: project was modified by another user.');
-  if (res.status === 428) throw new Error('ETag required for update.');
-  if (!res.ok) throw new Error(`Update failed: ${res.status}`);
-  return res.json();
-}
-```
-
-### Idempotent export start
-
-```ts
-async function startExport(projectId: string, token: string): Promise<void> {
-  const res = await fetch(`/api/projects/${projectId}/exports?token=${token}`, {
-    method: 'POST',
-  });
-  if (res.status === 202) return; // accepted or already running
-  if (res.status === 303) { /* redirect to completed export */ return; }
-  throw new Error(`Export failed: ${res.status}`);
-}
-```
-
-### Paginated samples
-
-```ts
-async function fetchSamples(page: number, limit = 50): Promise<Sample[]> {
-  const res = await fetch(`/api/samples?page=${page}&limit=${limit}`);
-  if (!res.ok) throw new Error('Failed to fetch samples');
-  return res.json();
-}
-```
-
-### Sample upload (multipart)
-
-```ts
-async function uploadSample(file: File, name: string, genre: string): Promise<Sample> {
-  const form = new FormData();
-  form.append('file', file);
-  form.append('name', name);
-  form.append('genre', genre);
-  const res = await fetch('/api/samples', { method: 'POST', body: form });
-  if (!res.ok) throw new Error('Upload failed');
-  return res.json();
-}
-```
-
----
-
-## 8. Styling Rules
-
-- **Zero CSS-in-JS.** No `styled-components`, no `emotion`, no inline `style` objects for layout.
-- **Tailwind classes only** for all visual styling.
-- Direct DOM mutations via `useRef` (for real-time animation) may set `style.property` — this is the only allowed exception.
-- Icons: use `lucide-react` exclusively. Example: `import { Play, Square } from 'lucide-react'`.
-- No Heroicons, no Material Icons, no SVG sprites from external sources.
-
----
-
-## 9. TypeScript Rules
-
-- TypeScript is **mandatory** — no `.js` files in `src/`.
-- **Always** type binary data correctly:
-  - PCM data: `Float32Array`
-  - FFT data: `Uint8Array`
-  - Raw frames: `ArrayBuffer`
-  - Never mix these up — incorrect typed array views cause silent audio corruption.
-- Use `strict: true` (already configured in `tsconfig.app.json`).
-- Prefer `interface` for object shapes, `type` for unions and aliases.
-- Never use `any` — use `unknown` and narrow with type guards.
-
----
-
-## 10. Binary Frame Decoding Reference
-
-Received from Phoenix Channel as `ArrayBuffer`:
-
-```ts
-function decodeAudioFrame(buffer: ArrayBuffer): { fft: Uint8Array; pcm: Float32Array } {
-  const msgType = new DataView(buffer).getUint8(0); // should be 1
-  const fft = new Uint8Array(buffer, 4, 512);        // bytes 4–515
-  const pcm = new Float32Array(buffer, 516);          // bytes 516+ (N samples)
-  return { fft, pcm };
-}
-```
-
-**Byte layout:**
-
-| Offset | Size    | Type          | Content                    |
-|--------|---------|---------------|----------------------------|
-| 0      | 1 byte  | `Uint8`       | Message type (`1` = audio) |
-| 1–3    | 3 bytes | padding       | Zero bytes (alignment)     |
-| 4–515  | 512 B   | `Uint8Array`  | FFT bins (0–255)           |
-| 516+   | N×4 B   | `Float32Array`| PCM samples (−1.0 to 1.0) |
-
----
-
-## 11. Build & Dev Commands
+## 11. Validation
 
 ```bash
-npm install         # install dependencies
-npm run dev         # Vite HMR dev server (proxies /api and /socket to :4000)
-npm run build       # tsc -b && vite build (type-check + bundle)
-npm run lint        # ESLint
-npm run preview     # serve production build locally
+cd frontend
+npm run lint      # ESLint
+npm run build     # TypeScript type check + Vite production build
 ```
-
-**Vite proxy** should be configured in `vite.config.ts` to route API and WebSocket traffic:
-
-```ts
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    proxy: {
-      '/api': 'http://localhost:4000',
-      '/socket': { target: 'ws://localhost:4000', ws: true },
-    },
-  },
-});
-```
-
----
-
-## 12. Token Generation for Idempotent Exports
-
-Generate UUIDs client-side with the built-in Web Crypto API — no library needed:
-
-```ts
-const token = crypto.randomUUID(); // returns string like "550e8400-e29b-41d4-a716-446655440000"
-```
-
-Store the token in Zustand alongside the export status so retries reuse the same token.

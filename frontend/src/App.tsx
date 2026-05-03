@@ -30,7 +30,7 @@ function App() {
 
       <main>
         {activeProject ? (
-          <ProjectWorkspace project={activeProject} />
+          <ProjectWorkspace project={activeProject} onBack={handleBack} />
         ) : (
           <div className="mx-auto max-w-4xl">
             <ProjectList onSelect={handleSelect} />

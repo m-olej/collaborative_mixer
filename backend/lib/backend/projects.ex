@@ -102,6 +102,51 @@ defmodule Backend.Projects do
   end
 
   @doc """
+  Atomically move multiple tracks. Each move includes an ETag for optimistic locking.
+  Returns `{:ok, [updated_tracks]}` or `{:error, {:etag_mismatch, track_id}}`.
+  """
+  def batch_move_tracks(project_id, moves) do
+    Repo.transaction(fn ->
+      Enum.map(moves, fn move ->
+        track_id = move["id"] || move[:id]
+        etag = move["etag"] || move[:etag]
+        position_ms = move["position_ms"] || move[:position_ms]
+        lane_index = move["lane_index"] || move[:lane_index]
+
+        case get_track(track_id) do
+          {:ok, track} ->
+            if track.project_id != to_integer(project_id) do
+              Repo.rollback({:not_found, track_id})
+            end
+
+            case verify_track_etag(track, etag) do
+              :ok ->
+                attrs =
+                  %{}
+                  |> then(fn a ->
+                    if position_ms != nil, do: Map.put(a, "position_ms", position_ms), else: a
+                  end)
+                  |> then(fn a ->
+                    if lane_index != nil, do: Map.put(a, "lane_index", lane_index), else: a
+                  end)
+
+                case update_track(track, attrs) do
+                  {:ok, updated} -> updated
+                  {:error, changeset} -> Repo.rollback({:update_failed, track_id, changeset})
+                end
+
+              {:error, :etag_mismatch} ->
+                Repo.rollback({:etag_mismatch, track_id})
+            end
+
+          {:error, :not_found} ->
+            Repo.rollback({:not_found, track_id})
+        end
+      end)
+    end)
+  end
+
+  @doc """
   Merge multiple tracks into one new track within a database transaction.
   Deletes the original tracks and creates a merged replacement.
   """

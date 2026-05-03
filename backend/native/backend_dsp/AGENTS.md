@@ -1,394 +1,347 @@
 # Cloud DAW — Rust DSP Engine Agent Guide
 
 > Rust NIF crate (`backend_dsp`). Read root `AGENTS.md` first for cross-cutting concerns.
-> This crate is compiled via `mix compile` (Rustler). Never run `cargo` directly in CI; let Mix manage the build.
+> Compiled via `mix compile` (Rustler). Do **not** run `cargo` directly in CI — let Mix manage the build.
 
 ---
 
 ## 1. Crate Identity
 
-| Key              | Value                                      |
-|------------------|--------------------------------------------|
-| Crate name       | `backend_dsp`                              |
-| Crate type       | `cdylib` (shared library loaded by BEAM)   |
-| Rust edition     | 2021                                       |
-| Rustler version  | 0.37.3                                     |
-| Elixir NIF module| `Elixir.Backend.DSP`                       |
-| Entry point      | `native/backend_dsp/src/lib.rs`            |
-| Workspace root   | `backend/Cargo.toml`                       |
+| Key               | Value                                      |
+|-------------------|--------------------------------------------|
+| Crate name        | `backend_dsp`                              |
+| Crate type        | `cdylib` (shared library loaded by BEAM)   |
+| Rust edition      | 2021                                       |
+| Rustler version   | 0.37.3                                     |
+| Elixir NIF module | `Elixir.Backend.DSP`                       |
+| Entry point       | `native/backend_dsp/src/lib.rs`            |
+| Workspace root    | `backend/Cargo.toml`                       |
 
 ---
 
-## 2. Dependencies Reference
+## 2. Dependencies
 
-| Crate     | Version | Purpose                                                              |
-|-----------|---------|----------------------------------------------------------------------|
-| rustler   | 0.37.3  | Erlang NIF bindings — exposes Rust functions to Elixir               |
-| symphonia | 0.5.5 (`features = ["all"]`) | Decode audio files (WAV, MP3, FLAC, OGG) into PCM |
-| biquad    | 0.6.0   | Biquad IIR filters for parametric EQ (low-shelf, high-shelf, peaking)|
-| rustfft   | 6.4.1   | Fast Fourier Transform for FFT spectrum data                         |
-| hound     | 3.5.1   | Write WAV files for project export                                   |
-| rubato    | 2.0.0   | Sample rate conversion (resampling) to normalize track rates          |
-| tempfile  | 3.27.0  | Write in-progress render files to temp paths before finalizing       |
+| Crate     | Version | Purpose                                                                |
+|-----------|---------|------------------------------------------------------------------------|
+| rustler   | 0.37.3  | Erlang NIF bindings                                                    |
+| fundsp    | 0.23.0  | Band-limited oscillator nodes (`sine_hz`, `saw_hz`, etc.)             |
+| biquad    | 0.6.0   | Biquad IIR filters for SVF/Moog low-pass (parametric EQ)              |
+| rustfft   | 6.4.1   | FFT computation for spectrum visualizer                                |
+| hound     | 3.5.1   | WAV file writing (for future export render)                            |
+| rubato    | 2.0.0   | Sample-rate conversion (used by timeline decoder)                      |
+| symphonia | 0.5.5 (`features=["all"]`) | Audio file decoding (WAV/MP3/FLAC for timeline tracks)    |
+| tempfile  | 3.27.0  | Temporary files for mmap-backed decoded audio                          |
+| memmap2   | 0.9     | Memory-mapped file access for zero-copy PCM reads                      |
+
+> **Note:** `hound` is reserved for a future WAV export pipeline.
 
 ---
 
 ## 3. CRITICAL: BEAM Scheduler Safety (Dirty NIFs)
 
-BEAM assumes NIFs complete in **< 1 millisecond**. Any NIF that runs longer will block the scheduler thread and starve all other Erlang processes — potentially crashing the entire application.
+BEAM assumes NIFs complete in **< 1 millisecond**. Any NIF running longer blocks the scheduler and starves all other Erlang processes.
 
-### Rule: All heavy DSP functions MUST be Dirty NIFs
+**All DSP functions that render audio MUST carry `schedule = "DirtyCpu"`.**
 
 ```rust
-// ✅ CORRECT — does not block scheduler
+// ✅ CORRECT
 #[rustler::nif(schedule = "DirtyCpu")]
-fn render_wav(export_id: u64) -> NifResult<String> {
-    // ... may take seconds ...
-}
+fn render_synth<'a>(env: Env<'a>, state: SynthState, duration_secs: f64) -> NifResult<Binary<'a>> { ... }
 
-// ✅ CORRECT alternative — offload to OS thread
-#[rustler::nif(schedule = "DirtyCpu")]
-fn mix_and_stream(tracks: Vec<TrackInfo>, settings: MixSettings) -> NifResult<Vec<u8>> {
-    // Mix happens in this DirtyCpu context
-}
-
-// ❌ WRONG — will hang the BEAM scheduler for all users
-#[rustler::nif]  // no schedule = DirtyCpu
-fn render_wav(export_id: u64) -> NifResult<String> { ... }
+// ❌ WRONG — blocks the scheduler
+#[rustler::nif]
+fn render_synth<'a>(...) -> NifResult<Binary<'a>> { ... }
 ```
 
-### Classification
+### NIF Schedule Classification
 
-| NIF function       | Schedule         | Reason                              |
-|--------------------|------------------|-------------------------------------|
-| `ping`             | Default (fast)   | Trivial, microseconds               |
-| `mix_and_stream`   | `DirtyCpu`       | Mixes audio buffers (milliseconds)  |
-| `render_wav`       | `DirtyCpu`       | Full project render (seconds)       |
-| `decode_audio_file`| `DirtyCpu`       | File I/O + decoding                 |
+| NIF                      | Schedule | Reason                                          |
+|--------------------------|----------|-------------------------------------------------|
+| `ping`                   | default  | Trivial, microseconds                           |
+| `generate_tone`          | default  | Simple sine loop (testing only)                 |
+| `render_synth`           | DirtyCpu | Full signal chain render (tens of ms)           |
+| `render_voice_pcm`       | DirtyCpu | Single voice render (called concurrently)       |
+| `mix_voices`             | DirtyCpu | Mixing + FFT + frame assembly                   |
+| `generate_waveform_peaks`| DirtyCpu | PCM scan over potentially large buffers         |
+| `create_synth_voice`     | default  | Creates ResourceArc<SynthVoice> (fast alloc)    |
+| `render_voice_chunk`     | default  | Renders N samples from stateful voice (< 5 ms)  |
+| `voice_note_off`         | default  | Triggers ADSR release (trivial state flip)       |
+| `voice_is_done`          | default  | Checks envelope done + silence threshold         |
+| `init_engine`            | default  | Creates empty ResourceArc<ProjectEngine>        |
+| `decode_and_load_track`  | DirtyCpu | Decode audio + mmap + insert clip (100s of ms)  |
+| `rebuild_timeline`       | default  | Replace interval tree atomically (< 1 ms)       |
+| `set_track_params`       | default  | Update volume/mute/pan map (< 1 ms)             |
+| `mix_chunk`              | DirtyCpu | Query tree, read mmap, mix, FFT, frame          |
 
 ---
 
-## 4. NIF Registration Pattern
+## 4. Module Structure
 
-All public NIFs must be registered in `rustler::init!`:
+```
+src/
+├── lib.rs          ← NIF registration, ResourceArc setup, on_load (2 resource types)
+├── state.rs        ← SynthState struct (NifMap — 29 fields decoded from Elixir map)
+├── engine.rs       ← Synth render orchestrator; wires all DSP nodes (stateless)
+├── voice.rs        ← Streaming voice: persistent DSP state across render calls (stateful)
+├── interface.rs    ← Binary wire-frame assembly (header + FFT + PCM)
+├── mixer.rs        ← Polyphonic voice mixing + soft limiting + frame build
+├── waveform.rs     ← Waveform peak generation for timeline thumbnails
+├── timeline/       ← Timeline playback sub-module (NEW)
+│   ├── mod.rs          ← ProjectEngine struct, ProjectEngineResource, TrackParams
+│   ├── decoder.rs      ← symphonia decode → rubato resample → mono → tempfile
+│   ├── mmap_store.rs   ← MmapStore: HashMap<track_id, MmapEntry> for zero-copy reads
+│   ├── interval_tree.rs ← ClipInfo + ClipTree (sorted vec, O(log n + k) query)
+│   └── chunk_mixer.rs  ← Hot path: query tree → read mmap → volume mix → FFT → frame
+├── dsp/
+    ├── mod.rs          ← Re-exports all DSP sub-modules
+    ├── oscillators.rs  ← UnisonOscillator, build_unison_oscillator
+    ├── filters.rs      ← FilterType (SVF / Moog / Highpass / Bandpass), build_filter
+    ├── effects.rs      ← Drive, Distortion, Chorus, Reverb, Volume nodes
+    ├── envelope.rs     ← ADSR envelope generator (amp + filter modulation)
+    ├── lfo.rs          ← Lfo struct, LfoTarget enum
+    └── fft.rs          ← compute_fft_spectrum, FFT_SIZE = 512
+```
+
+---
+
+## 5. Exposed NIFs
 
 ```rust
 rustler::init!("Elixir.Backend.DSP", [
     ping,
-    mix_and_stream,
-    render_wav,
-    decode_audio_file,
-]);
+    generate_tone,
+    render_synth,
+    render_voice_pcm,
+    mix_voices,
+    generate_waveform_peaks,
+    // Streaming voice NIFs
+    create_synth_voice,
+    render_voice_chunk,
+    voice_note_off,
+    voice_is_done,
+    // Timeline playback NIFs
+    init_engine,
+    decode_and_load_track,
+    rebuild_timeline,
+    set_track_params,
+    mix_chunk,
+], load = on_load);
 ```
 
-The string `"Elixir.Backend.DSP"` must match the Elixir module name exactly (dot-separated, `Elixir.` prefix).
+### `render_synth(state: SynthState, duration_secs: f64) -> Binary`
+
+- Renders `duration_secs` seconds of audio (typically 1.0) from the synth parameter struct.
+- Returns a complete binary **wire frame** with message type byte `2`.
+- Calls `engine::render` → `interface::build_synth_frame`.
+- The returned `Binary<'a>` is allocated on the Erlang heap via `OwnedBinary` — no double-copy.
+
+### `render_voice_pcm(state: SynthState, duration_secs: f64) -> Binary`
+
+- Renders a single voice as raw f32 LE PCM bytes (no header, no FFT).
+- Used by `ProjectSession.render_bar/3` which spawns one `Task.async` per note and calls this NIF concurrently.
+
+### `mix_voices(pcm_binaries: Vec<Binary>, offsets: Vec<i64>, total_samples: i64) -> Binary`
+
+- Decodes each binary back to `Vec<f32>`.
+- Additively mixes at their sample offsets into a single buffer of `total_samples`.
+- Applies tanh soft limiting only where amplitude exceeds ±1.
+- Computes FFT, assembles wire frame, returns binary (type 2).
+
+### `generate_waveform_peaks(audio_binary: Binary, num_bins: i64) -> Vec<(f32, f32)>`
+
+- Accepts a binary of f32 LE PCM samples.
+- Returns `[{min, max}]` tuples for `num_bins` segments.
+- Used by `ProjectChannel.handle_in("save_sample")` to generate timeline thumbnail data.
 
 ---
 
-## 5. Current NIF Stubs (lib.rs)
+## 6. `SynthState` (state.rs)
+
+Decoded automatically by Rustler from a plain Elixir map with **atom keys**.
 
 ```rust
-use rustler::{Atom, NifResult};
+#[derive(Debug, Clone, NifMap)]
+pub struct SynthState {
+    // Oscillator
+    pub osc_shape: String,        // "saw" | "sine" | "square" | "triangle" | "noise"
+    pub frequency: f32,           // Hz (e.g. 440.0)
 
-mod atoms {
-    rustler::atoms! {
-        ok,
-        error,
-    }
+    // Unison
+    pub unison_voices: i32,       // 1–7
+    pub unison_detune: f32,       // cents, 0–50
+    pub unison_spread: f32,       // 0.0–1.0
+
+    // Filter
+    pub cutoff: f32,              // Hz (LPF cutoff)
+    pub resonance: f32,           // 0.0–1.0 (Q)
+    pub filter_type: String,      // "svf" | "moog" | "highpass" | "bandpass"
+
+    // Drive / Distortion
+    pub drive: f32,               // pre-filter overdrive multiplier (1.0 = clean)
+    pub distortion_type: String,  // "off" | "soft_clip" | "hard_clip" | "atan"
+    pub distortion_amount: f32,   // 0.0–1.0
+
+    // LFO
+    pub lfo_rate: f32,            // Hz, 0.1–20.0
+    pub lfo_depth: f32,           // 0.0–1.0
+    pub lfo_shape: String,        // "sine" | "triangle" | "square" | "saw"
+    pub lfo_target: String,       // "cutoff" | "pitch" | "volume"
+
+    // Chorus
+    pub chorus_rate: f32,         // Hz, 0.1–5.0
+    pub chorus_depth: f32,        // 0.0–1.0
+    pub chorus_mix: f32,          // 0.0–1.0
+
+    // Reverb
+    pub reverb_decay: f32,        // 0.0–1.0
+    pub reverb_mix: f32,          // 0.0–1.0
+
+    // Amp
+    pub volume: f32,              // 0.0–1.0
+
+    // Amp ADSR Envelope
+    pub amp_attack_ms: f32,       // 0–5000 ms
+    pub amp_decay_ms: f32,        // 0–5000 ms
+    pub amp_sustain: f32,         // 0.0–1.0
+    pub amp_release_ms: f32,      // 0–5000 ms
+
+    // Filter ADSR Envelope
+    pub filter_attack_ms: f32,    // 0–5000 ms
+    pub filter_decay_ms: f32,     // 0–5000 ms
+    pub filter_sustain: f32,      // 0.0–1.0
+    pub filter_release_ms: f32,   // 0–5000 ms
+    pub filter_env_depth: f32,    // Hz (cutoff sweep amount)
 }
-
-#[rustler::nif]
-fn ping() -> NifResult<String> {
-    Ok("Rust DSP Engine is online!".to_string())
-}
-
-rustler::init!("Elixir.Backend.DSP", [ping]);
 ```
+
+`Default::default()` produces: saw @ 440 Hz, 1 voice, SVF @ 5 kHz, no effects, volume 0.8.
+
+**Every field name must match the atom key in the Elixir `synth_params` map exactly** — Rustler validates at decode time.
 
 ---
 
-## 6. Planned NIF Interface
+## 7. Signal Chain (`engine.rs`)
 
-### `decode_audio_file`
+```
+SAMPLE_RATE = 44_100 Hz
 
-Decodes an audio file (WAV/MP3/FLAC) to normalized `f32` PCM samples at target sample rate.
-
-```rust
-#[rustler::nif(schedule = "DirtyCpu")]
-fn decode_audio_file(path: String, target_sample_rate: u32) -> NifResult<Vec<f32>> {
-    // 1. Open file with symphonia
-    // 2. Decode to interleaved f32 PCM
-    // 3. Resample to target_sample_rate using rubato
-    // 4. Return mono-mixed Vec<f32>
-}
+Unison Oscillators (N detuned voices, fundsp band-limited)
+        ↓
+Filter (SVF / Moog / Highpass / Bandpass)
+  modulated by LFO (block-rate) + Filter ADSR envelope
+        ↓
+Drive (tanh saturation via fundsp node)
+        ↓
+Distortion (soft_clip / hard_clip / atan, applied per sample)
+        ↓
+Amp ADSR Envelope (gates amplitude, prevents clicks)
+        ↓
+Chorus (modulated delay line, custom struct)
+        ↓
+Reverb (feedback delay network, custom struct)
+        ↓
+Volume (linear gain, optional LFO volume modulation)
+        ↓
+FFT (rustfft on final PCM → 512 Uint8 bins)
+        ↓
+Wire frame (interface::build_synth_frame)
 ```
 
-**Libraries:** `symphonia` for decode, `rubato` for resampling.
+`engine::render` is a pure function — same `SynthState` always produces the same audio.
 
-### `mix_and_stream`
-
-Mixes multiple tracks into one stereo master frame, applies EQ, and returns the binary frame for WebSocket broadcast.
-
-```rust
-#[derive(NifStruct)]
-#[module = "Backend.DSP.TrackInfo"]
-struct TrackInfo {
-    samples: Vec<f32>,  // pre-decoded PCM
-    volume: f32,        // 0.0–1.0
-    muted: bool,
-    eq: EqSettings,
-}
-
-#[derive(NifStruct)]
-#[module = "Backend.DSP.EqSettings"]
-struct EqSettings {
-    low_gain_db: f32,
-    mid_gain_db: f32,
-    high_gain_db: f32,
-}
-
-#[rustler::nif(schedule = "DirtyCpu")]
-fn mix_and_stream(
-    tracks: Vec<TrackInfo>,
-    frame_start: usize,
-    frame_size: usize,
-) -> NifResult<rustler::types::binary::OwnedBinary> {
-    // 1. Sum track samples scaled by volume (skip muted)
-    // 2. Apply biquad EQ filters per track
-    // 3. Compute FFT on mixed output (rustfft → 512 Uint8 bins)
-    // 4. Pack binary frame: [type_byte, 3×padding, 512×fft_u8, N×pcm_f32]
-    // 5. Return OwnedBinary
-}
-```
-
-### `render_wav`
-
-Renders the complete project to a temporary WAV file and returns the file path.
-
-```rust
-#[rustler::nif(schedule = "DirtyCpu")]
-fn render_wav(
-    tracks: Vec<TrackInfo>,
-    sample_rate: u32,
-    output_path: String,
-) -> NifResult<String> {
-    // 1. Mix all tracks for their full duration
-    // 2. Write to tempfile::NamedTempFile using hound::WavWriter
-    // 3. Move file to output_path when complete
-    // 4. Return final path
-}
-```
+`engine::render_pcm_only` skips FFT (used by `render_voice_pcm` for polyphonic voices).
 
 ---
 
-## 7. Binary Frame Packing (Rust Implementation)
+## 8. Binary Wire Frame Layout (`interface.rs`)
 
-The frame layout is fixed — match it exactly:
+```
+Offset   Size          Content
+───────────────────────────────────────────────────────────────
+0        1 byte        Message type ID (1=mixer, 2=synth)
+1        1 byte        MIDI note (voice_audio only, else 0)
+2–3      2 bytes       Zero-padding (4-byte alignment)
+4–515    512 bytes     FFT magnitude spectrum (0–255 per bin)
+516+     N × 4 bytes   PCM samples (f32 LE, −1.0 to 1.0)
+───────────────────────────────────────────────────────────────
+```
+
+Message type `1` is used for timeline/mixer audio frames (from `mix_chunk`). Type `2` is used for all synth, bar, and voice streaming renders.
+
+### ResourceArc Types
+
+Two ResourceArc types registered in `on_load`:
+
+| Type | Wrapper | Purpose |
+|---|---|---|
+| `ProjectEngine` | `ProjectEngineResource(Mutex<ProjectEngine>)` | Timeline: mmap store, interval tree, track params |
+| `SynthVoice` | `SynthVoiceResource(Mutex<SynthVoice>)` | Streaming voice: oscillators, envelopes, filters, effects |
+
+**JS decoder:**
+```js
+const fft = new Uint8Array(buffer, 4, 512);
+const pcm = new Float32Array(buffer, 516);
+```
+
+`build_synth_frame(fft: &FftBytes, pcm: &[f32]) -> Vec<u8>` pre-allocates the exact capacity to avoid reallocation. A `debug_assert!` validates the final length matches.
+
+---
+
+## 9. Unison Oscillator (`dsp/oscillators.rs`)
+
+- Up to 7 voices stacked using `fundsp` band-limited primitives: `sine_hz`, `square_hz`, `triangle_hz`, `saw_hz`, `noise`.
+- Voice frequencies spread symmetrically: `f × 2^(detune/1200)`.
+- Phase randomization uses a deterministic LCG seed so renders are reproducible for a given `SynthState`.
+- Gain normalized across voices to prevent clipping.
+- With `spread > 0`, outer voices receive `1 - center_distance * spread * 0.3` amplitude weight.
+
+---
+
+## 10. Polyphonic Voice Mixing (`mixer.rs`)
 
 ```rust
-fn pack_audio_frame(fft_bins: &[u8; 512], pcm: &[f32]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(1 + 3 + 512 + pcm.len() * 4);
-    frame.push(1u8);                    // message type = audio
-    frame.extend_from_slice(&[0u8; 3]); // padding (4-byte alignment)
-    frame.extend_from_slice(fft_bins);  // 512 FFT bytes
-    for &sample in pcm {
-        frame.extend_from_slice(&sample.to_le_bytes()); // Little Endian f32
-    }
-    frame
-}
+pub fn mix_and_build_frame(
+    voice_pcms: &[&[f32]],
+    offsets: &[usize],
+    total_samples: usize,
+) -> Vec<u8>
 ```
 
-**Total header size:** 516 bytes (1 + 3 + 512). JS reads `Float32Array(buffer, 516)`.
+1. Zero-initializes a `total_samples` buffer.
+2. Additively sums each voice at its sample offset.
+3. Applies `tanh` soft limiting only on samples where `|x| > 1.0` (preserves dynamics).
+4. Computes FFT and calls `build_synth_frame`.
 
 ---
 
-## 8. FFT Computation (rustfft → Uint8 bins)
+## 11. Memory Safety at the NIF Boundary
+
+`render_synth` and all returning-binary NIFs follow this pattern:
 
 ```rust
-use rustfft::{FftPlanner, num_complex::Complex};
+let frame_bytes: Vec<u8> = build_synth_frame(&fft, &pcm);  // OS heap
 
-fn compute_fft_bins(pcm: &[f32], num_bins: usize) -> Vec<u8> {
-    let fft_size = num_bins * 2; // e.g. 1024 for 512 bins
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(fft_size);
+let mut owned = OwnedBinary::new(frame_bytes.len())         // Erlang heap
+    .ok_or(rustler::Error::BadArg)?;
 
-    let mut buffer: Vec<Complex<f32>> = pcm.iter()
-        .take(fft_size)
-        .map(|&s| Complex { re: s, im: 0.0 })
-        .collect();
-    // zero-pad if needed
-    buffer.resize(fft_size, Complex { re: 0.0, im: 0.0 });
+owned.as_mut_slice().copy_from_slice(&frame_bytes);         // single copy
 
-    fft.process(&mut buffer);
-
-    // Take first half (positive frequencies), compute magnitude, scale to 0–255
-    buffer.iter()
-        .take(num_bins)
-        .map(|c| {
-            let mag = (c.norm() / fft_size as f32 * 2.0).min(1.0);
-            (mag * 255.0) as u8
-        })
-        .collect()
-}
+Ok(owned.release(env))                                      // BEAM takes ownership
 ```
+
+- **One allocation** on the OS heap (the `Vec<u8>`).
+- **One allocation** on the Erlang heap (`OwnedBinary`).
+- **One copy** (OS → Erlang).
+- After `release`, BEAM GC manages the binary — no double-free risk.
+- Never `panic!` inside a NIF — use `NifResult` / `ok_or` everywhere.
 
 ---
 
-## 9. EQ Filtering (biquad)
+## 12. Adding a New NIF — Checklist
 
-```rust
-use biquad::{Biquad, Coefficients, DirectForm1, ToHertz, Type, Q_BUTTERWORTH_F32};
-
-fn apply_eq(samples: &mut Vec<f32>, sample_rate: f32, settings: &EqSettings) {
-    // Low shelf
-    if settings.low_gain_db.abs() > 0.01 {
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::LowShelf(settings.low_gain_db),
-            sample_rate.hz(),
-            200.0.hz(),
-            Q_BUTTERWORTH_F32,
-        ).unwrap();
-        let mut filter = DirectForm1::<f32>::new(coeffs);
-        for s in samples.iter_mut() { *s = filter.run(*s); }
-    }
-    // High shelf (similar, use 8000.hz() cutoff)
-    // Mid peaking (use Type::PeakingEQ)
-}
-```
-
----
-
-## 10. Audio Decoding with Symphonia
-
-```rust
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use std::fs::File;
-
-fn decode_to_f32(path: &str) -> Vec<f32> {
-    let file = File::open(path).expect("open audio file");
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    // hint.with_extension("mp3"); // optional
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .expect("probe format");
-    let mut format = probed.format;
-    let track = format.default_track().expect("find track");
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .expect("make decoder");
-
-    let mut samples = Vec::new();
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        let decoded = decoder.decode(&packet).expect("decode packet");
-        let spec = *decoded.spec();
-        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-        buf.copy_interleaved_ref(decoded);
-        samples.extend_from_slice(buf.samples());
-    }
-    samples
-}
-```
-
----
-
-## 11. Resampling with Rubato
-
-```rust
-use rubato::{FftFixedIn, Resampler};
-
-fn resample(samples: Vec<f32>, from_rate: usize, to_rate: usize) -> Vec<f32> {
-    if from_rate == to_rate { return samples; }
-    let chunk_size = 1024;
-    let mut resampler = FftFixedIn::<f32>::new(from_rate, to_rate, chunk_size, 2, 1)
-        .expect("create resampler");
-    let waves_in = vec![samples];
-    let mut output = Vec::new();
-    for chunk in waves_in[0].chunks(chunk_size) {
-        let padded = [chunk.to_vec()]; // channel 0
-        let out = resampler.process(&padded, None).expect("resample chunk");
-        output.extend_from_slice(&out[0]);
-    }
-    output
-}
-```
-
----
-
-## 12. WAV Export with Hound + Tempfile
-
-```rust
-use hound::{WavSpec, WavWriter, SampleFormat};
-use tempfile::NamedTempFile;
-
-fn write_wav(samples: &[f32], sample_rate: u32, final_path: &str) -> std::io::Result<()> {
-    let temp = NamedTempFile::new()?;
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: SampleFormat::Float,
-    };
-    let mut writer = WavWriter::new(temp.reopen()?, spec).expect("create writer");
-    for &s in samples {
-        writer.write_sample(s).expect("write sample");
-    }
-    writer.finalize().expect("finalize wav");
-    temp.persist(final_path)?;
-    Ok(())
-}
-```
-
----
-
-## 13. Error Handling in NIFs
-
-- **Never panic** inside a NIF — a panic kills the BEAM scheduler thread.
-- Return `NifResult<T>` (which is `Result<T, rustler::Error>`).
-- Map Rust errors to `Err(rustler::Error::Term(Box::new(atoms::error())))`.
-
-```rust
-#[rustler::nif(schedule = "DirtyCpu")]
-fn render_wav(path: String) -> NifResult<String> {
-    do_render(&path).map_err(|e| {
-        // Log via eprintln! (goes to Erlang logger)
-        eprintln!("render_wav error: {e}");
-        rustler::Error::Term(Box::new(atoms::error()))
-    })
-}
-```
-
----
-
-## 14. Data Format Invariants
-
-- All internal audio data: `f32`, range −1.0 to 1.0 (clamp after mixing to prevent clipping).
-- All byte order: **Little Endian** (Rust default for `f32::to_le_bytes()`).
-- Sample rate standard: 44100 Hz (all tracks resampled to this via rubato before mixing).
-- FFT bins: 512 Uint8 values (0–255), computed from 1024-point FFT of mixed output.
-- Frame PCM chunk size: match the AudioWorklet block size (typically 128 samples per frame, adjustable).
-
----
-
-## 15. Build Notes
-
-```bash
-# Build is triggered by Mix — do NOT run cargo manually in CI
-mix compile          # compiles Elixir + Rust NIF
-
-# Local Rust check (optional, for fast iteration)
-cd native/backend_dsp
-cargo check
-cargo clippy -- -D warnings
-```
-
-The compiled `.so` / `.dylib` is placed in `priv/native/` by Rustler automatically.
+1. Implement the function in the appropriate module (`engine.rs`, `mixer.rs`, etc.).
+2. Add a NIF wrapper in `lib.rs` with the correct `schedule` annotation.
+3. Register it in `rustler::init!`.
+4. Add a stub + `@doc` in `lib/backend/dsp.ex`.
+5. Run `mix compile` to rebuild the `.so`.
+6. Run `mix precommit` to confirm no warnings or test failures.

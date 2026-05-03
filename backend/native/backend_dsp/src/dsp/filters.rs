@@ -28,6 +28,10 @@ pub enum FilterType {
     SvfLowpass,
     /// Moog ladder lowpass — nonlinear, warm, resonant squeal at high Q.
     MoogLowpass,
+    /// SVF highpass — removes low frequencies below cutoff.
+    SvfHighpass,
+    /// SVF bandpass — passes a band around the cutoff frequency.
+    SvfBandpass,
 }
 
 impl FilterType {
@@ -36,6 +40,8 @@ impl FilterType {
     pub fn from_str(s: &str) -> Self {
         match s {
             "moog" => FilterType::MoogLowpass,
+            "highpass" => FilterType::SvfHighpass,
+            "bandpass" => FilterType::SvfBandpass,
             _ => FilterType::SvfLowpass,
         }
     }
@@ -75,25 +81,13 @@ pub fn build_filter(
     let q = 0.707_f32 + resonance.clamp(0.0, 1.0) * (10.0 - 0.707);
 
     let mut unit: Box<dyn AudioUnit> = match filter_type {
-        FilterType::SvfLowpass => {
-            // `lowpass_hz::<f32>(f, q)` builds a FixedSvf with the parameters
-            // baked in at construction time.  This is the correct choice when
-            // parameters are stable across the rendered buffer.
-            //
-            // The SVF processes one sample at a time via `filter_mono(x)`.
-            Box::new(lowpass_hz::<f32>(cutoff_clamped, q))
-        }
+        FilterType::SvfLowpass => Box::new(lowpass_hz::<f32>(cutoff_clamped, q)),
 
-        FilterType::MoogLowpass => {
-            // `moog_hz::<f32>(frequency, q)` builds a Moog ladder LPF.
-            // The Moog node uses a nonlinear tanh approximation internally,
-            // giving it the "self-oscillation" character as Q approaches 1.0.
-            //
-            // Note: moog_hz Q is normalised differently from SVF Q.
-            // We pass the same Q value — the tonal difference is part of the
-            // character of choosing the Moog mode.
-            Box::new(moog_hz::<f32>(cutoff_clamped, q))
-        }
+        FilterType::MoogLowpass => Box::new(moog_hz::<f32>(cutoff_clamped, q)),
+
+        FilterType::SvfHighpass => Box::new(highpass_hz::<f32>(cutoff_clamped, q)),
+
+        FilterType::SvfBandpass => Box::new(bandpass_hz::<f32>(cutoff_clamped, q)),
     };
 
     unit.set_sample_rate(sample_rate);

@@ -2,6 +2,7 @@ import { Socket, Channel } from "phoenix";
 import { create } from "zustand";
 import type { MixerState, CollabSelection } from "../types/daw";
 import { useCollabStore } from "./useCollabStore";
+import { useDesignViewStore } from "./useDesignViewStore";
 import { useTimelineStore } from "./useTimelineStore";
 
 /** Callback for feeding decoded audio frames to the visualization. */
@@ -19,6 +20,9 @@ interface SocketState {
   setVisualizationCallback: (cb: VisualizationCallback | null) => void;
   pushCursorMove: (x: number, y: number) => void;
   pushSelectionUpdate: (selection: CollabSelection | null) => void;
+  pushStartPlayback: (cursorMs: number) => void;
+  pushStopPlayback: () => void;
+  pushSeek: (cursorMs: number) => void;
 }
 
 export const useSocketStore = create<SocketState>((set, get) => ({
@@ -152,6 +156,45 @@ export const useSocketStore = create<SocketState>((set, get) => ({
       useCollabStore.getState().updateRemoteSelection(payload.user, payload.color, payload.selection);
     });
 
+    // --- Keyboard key coloring (Phase 3) ---
+    channel.on("key_down", (payload: { user: string; color: string; midi: number }) => {
+      useCollabStore.getState().setKeyDown(payload.midi, payload.user, payload.color);
+    });
+    channel.on("key_up", (payload: { user: string; midi: number }) => {
+      useCollabStore.getState().setKeyUp(payload.midi, payload.user);
+    });
+
+    // --- Audio sync toggle (Phase 4) ---
+    channel.on("sync_update", (payload: { user: string; view_id: string; enabled: boolean }) => {
+      void payload;
+    });
+
+    // --- Track drag highlight (Phase 6) ---
+    channel.on("tracks_dragging", (payload: { user: string; color: string; track_ids: number[] }) => {
+      useTimelineStore.getState().setDraggingByUser(payload.user, payload.color, payload.track_ids);
+    });
+    channel.on("tracks_drag_end", (payload: { user: string }) => {
+      useTimelineStore.getState().clearDraggingByUser(payload.user);
+    });
+
+    // --- Design view broadcast (Phase 2) ---
+    channel.on("design_view_update", (payload: { view_id: string; synth_params: Record<string, unknown> }) => {
+      useDesignViewStore.getState().handleRemoteUpdate(
+        payload.view_id,
+        payload.synth_params as never,
+      );
+    });
+
+    // Initialize design views from join state once it arrives.
+    const unsubMixer = useSocketStore.subscribe((state) => {
+      if (state.mixerState?.design_views) {
+        useDesignViewStore.getState().initFromServer(
+          state.mixerState.design_views as never,
+        );
+        unsubMixer();
+      }
+    });
+
     set({ socket, channel });
   },
 
@@ -168,5 +211,27 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
   pushSelectionUpdate: (selection) => {
     get().channel?.push("selection_update", selection ?? {});
+  },
+
+  pushStartPlayback: (cursorMs) => {
+    const ch = get().channel;
+    if (!ch) return;
+    useTimelineStore.getState().setPlaying(true);
+    useTimelineStore.getState().setPlayheadMs(cursorMs);
+    ch.push("start_playback", { cursor_ms: cursorMs });
+  },
+
+  pushStopPlayback: () => {
+    const ch = get().channel;
+    if (!ch) return;
+    useTimelineStore.getState().setPlaying(false);
+    ch.push("stop_playback", {});
+  },
+
+  pushSeek: (cursorMs) => {
+    const ch = get().channel;
+    if (!ch) return;
+    useTimelineStore.getState().setPlayheadMs(cursorMs);
+    ch.push("seek", { cursor_ms: cursorMs });
   },
 }));

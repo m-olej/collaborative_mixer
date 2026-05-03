@@ -1,302 +1,290 @@
 # Frontend
 
-The frontend is a React + TypeScript single-page application built with Vite, using Tailwind CSS for styling and Zustand for state management.
-
-**Location**: `frontend/`
-
-## Technology Stack
+## Stack
 
 | Technology | Version | Purpose |
 |---|---|---|
-| React | 19.x | UI component framework |
-| TypeScript | 6.x | Type-safe JavaScript |
-| Vite | 8.x | Build tool and dev server |
-| Tailwind CSS | 4.x | Utility-first CSS framework |
-| Zustand | 5.x | Lightweight state management |
-| Phoenix (JS) | 1.8.x | WebSocket client for Phoenix Channels |
-| Lucide React | 1.8.x | Icon library |
+| React | 19 | Component library |
+| TypeScript | 5+ | Type-safe JS |
+| Vite | 6+ | Dev server + bundler |
+| Tailwind CSS | v4 | Utility-first styling |
+| Zustand | 5 | State management |
+| phoenix (JS) | 1.8 | WebSocket client (Phoenix Channels) |
+| lucide-react | — | Icon library |
 
-## Development Setup
+## Source Structure
 
-```bash
-npm install
-npm run dev    # Vite dev server on :5173, proxies /api and /socket to :4000
-npm run build  # TypeScript check + production build
-npm run lint   # ESLint
 ```
-
-**Proxy configuration** (vite.config.ts):
-- `/api` → `http://localhost:4000`
-- `/socket` → `ws://localhost:4000`
-
----
+frontend/src/
+├── main.tsx                         # ReactDOM entry point
+├── App.tsx                          # Root router: ProjectList ↔ ProjectWorkspace
+├── App.css / index.css              # Global styles
+│
+├── api/
+│   └── rest.ts                      # REST client: all CRUD endpoints + optimistic locking
+│
+├── types/
+│   └── daw.ts                       # All TypeScript types: Project, Track, Sample, SynthParams, MixerState
+│
+├── store/
+│   ├── useProjectStore.ts           # Projects CRUD state (REST-backed)
+│   ├── useSocketStore.ts            # Phoenix WebSocket lifecycle, mixer state, binary frame handlers
+│   ├── useDesignViewStore.ts        # Multi-user synth params: per-view state, audio sync
+│   ├── useTimelineStore.ts          # Timeline: tracks, playhead, zoom, snap, selections, drag state
+│   └── useCollabStore.ts            # Local/remote users, cursor positions, keyboard collab
+│
+├── hooks/
+│   ├── useAudioWorklet.ts           # Web Audio API: AudioContext + AudioWorkletNode lifecycle
+│   └── useMetronome.ts              # Count-in generator (sine clicks + timing)
+│
+├── presets/
+│   └── synthPresets.ts              # ~15 factory presets (Basses, Synths/Keys, Pads, Drums)
+│
+├── components/
+│   ├── ProjectList.tsx              # Dashboard: list, create, edit, delete projects; user identity
+│   ├── ProjectWorkspace.tsx         # WebSocket lifecycle, tab switching (Mixer/Design), settings
+│   ├── AudioVisualization.tsx       # Dual canvas: FFT spectrum + oscilloscope
+│   ├── SpectrumCanvas.tsx           # Standalone FFT component (available, unused in layout)
+│   ├── SynthControls.tsx            # Full synth panel: 29 params, presets, keyboard, ADSR
+│   ├── Keyboard.tsx                 # 2-octave piano: QWERTY + mouse, octave switching, collab
+│   ├── AdsrEnvelope.tsx             # Canvas ADSR visualization + time/level sliders
+│   │
+│   ├── Design/
+│   │   ├── DesignView.tsx           # Sample design: multi-user tabs, synth + recorder + piano roll
+│   │   ├── SampleRecorder.tsx       # Recording state machine: count-in → record → render → save
+│   │   └── PianoRoll.tsx            # Canvas: MIDI grid (C3–B4, 24 rows), note display
+│   │
+│   ├── Mixer/
+│   │   ├── TrackStrip.tsx           # Vertical fader: volume, mute, solo, pan, 3-band EQ
+│   │   ├── MasterBus.tsx            # Master volume + transport controls + BPM
+│   │   ├── Timeline.tsx             # Beat grid + lane layout, drag-drop, playhead, seek
+│   │   ├── TimelineLane.tsx         # Single lane: grid lines + clip children
+│   │   ├── TimelineClip.tsx         # Draggable clip: waveform peaks canvas, multi-select
+│   │   └── SampleBrowser.tsx        # Paginated sample library (GET /api/samples?page=N)
+│   │
+│   └── Collaboration/
+│       └── CursorOverlay.tsx        # Colored cursor dots + usernames for remote users
+│
+└── public/
+    └── audio-processor.js           # AudioWorklet processor (ring buffer playback)
+```
 
 ## Component Tree
 
 ```
 App
-├── ProjectList                          # Dashboard: list/create projects
-└── ProjectWorkspace                     # Active project container
-    ├── ProjectSettings                  # BPM, time signature, count-in editing
-    ├── MixerView (tab)
-    │   ├── SpectrumCanvas               # FFT visualizer (512 bars, canvas)
-    │   ├── TrackStrip[]                 # Per-track: volume, mute, 3-band EQ
-    │   ├── MasterBus                    # Master volume, transport, BPM display
-    │   └── SampleBrowser                # Paginated sample library sidebar
-    └── DesignView (tab)
-        ├── SynthControls                # Full synthesizer parameter UI
-        │   ├── Spectrum + Oscilloscope  # Dual canvas visualizers
-        │   ├── Parameter sections       # Osc, unison, filter, LFO, FX, amp
-        │   └── Keyboard                 # 2-octave QWERTY piano (C3–B4)
-        ├── SampleRecorder               # Recording state machine
-        └── PianoRoll                    # Canvas note visualization
+├── ProjectList                        (no project selected)
+│   ├── User identity card
+│   ├── New project form
+│   └── ProjectRow[] (inline edit + delete)
+│
+└── ProjectWorkspace                   (project selected)
+    ├── CursorOverlay
+    ├── Tab bar (Mixer / Design, sync toggle, connection status)
+    ├── ProjectSettings (conditional panel)
+    ├── AudioVisualization
+    │
+    ├── MixerView                      (Mixer tab)
+    │   ├── Timeline
+    │   │   └── TimelineLane[]
+    │   │       └── TimelineClip[]
+    │   ├── TrackStrip[] + MasterBus
+    │   └── SampleBrowser
+    │
+    └── DesignView                     (Design tab)
+        ├── Multi-user view tabs
+        ├── SynthControls
+        │   ├── PresetSelector
+        │   ├── Oscillator + Unison
+        │   ├── Filter + LFO
+        │   ├── Drive + Chorus + Reverb
+        │   ├── AdsrEnvelope (AMP / FILTER tabs)
+        │   ├── Volume + Render button
+        │   └── Keyboard
+        └── SampleRecorder
+            ├── Record / Stop / Play buttons
+            ├── PianoRoll (canvas)
+            └── Save to library form
 ```
-
----
-
-## State Management
-
-### `useProjectStore` (Zustand)
-
-Manages the project list for the dashboard.
-
-| State | Type | Description |
-|---|---|---|
-| `projects` | `Project[]` | All projects |
-| `loading` | `boolean` | Fetch in progress |
-| `error` | `string \| null` | Error message |
-
-| Action | Description |
-|---|---|
-| `fetchProjects()` | Calls `api.listProjects()` and updates state |
-| `createProject(name, bpm)` | Creates project and appends to list |
-
-### `useSocketStore` (Zustand)
-
-Manages the WebSocket connection and real-time mixer state.
-
-| State | Type | Description |
-|---|---|---|
-| `socket` | `Socket \| null` | Phoenix Socket instance |
-| `channel` | `Channel \| null` | Active project channel |
-| `connected` | `boolean` | Connection status |
-| `mixerState` | `MixerState` | Tracks, master volume, transport |
-
-| Action | Description |
-|---|---|
-| `connect(projectId)` | Creates socket, joins `project:{id}`, initializes mixer state from server snapshot |
-| `disconnect()` | Leaves channel, disconnects socket, resets state |
-
-On join, the store listens for `slider_update` broadcasts from other clients and applies them to `mixerState`.
-
----
 
 ## Audio Pipeline
 
-### AudioWorklet (`useAudioWorklet` hook + `audio-processor.js`)
+### AudioWorklet Architecture
 
-The audio playback system consists of two parts:
+Audio playback uses the Web Audio API's AudioWorklet for glitch-free, off-main-thread PCM playback.
 
-**Main thread** (`useAudioWorklet.ts`):
-- Creates `AudioContext` at 44,100 Hz
-- Loads `CloudDawProcessor` worklet from `/audio-processor.js`
-- Exposes `feedPcm(pcm)` — appends PCM to ring buffer (sequential playback)
-- Exposes `mixPcm(pcm)` — additively mixes PCM at current read position (polyphonic overlay)
-- Exposes `getContext()` — returns `AudioContext` for creating `AudioBufferSourceNode` instances
+**Setup** (`useAudioWorklet.ts`):
+1. Create `AudioContext` at 44,100 Hz sample rate
+2. Load `/audio-processor.js` worklet module
+3. Create `AudioWorkletNode("cloud-daw-processor")` → connect to `destination`
 
-**Audio thread** (`audio-processor.js`):
-- `CloudDawProcessor` extends `AudioWorkletProcessor`
-- Pre-allocated ring buffer: 441,000 samples (10 seconds at 44.1 kHz)
-- Two write modes:
-  - **Append** (`Float32Array` message): writes to `writePos`, advances cursor
-  - **Mix** (`{type: "mix", pcm}` message): adds to existing buffer at `readPos`
-- `process()`: reads 128 samples per quantum (~344 calls/sec), zero-allocation
-- Handles underrun (outputs silence) and overflow (drops oldest samples)
+**Two playback modes:**
 
-### Note Preview (`AudioBufferSourceNode`)
+| Method | Message Type | Behavior | Used By |
+|---|---|---|---|
+| `feedPcm(pcm)` | `{ type: "feed", pcm }` | Sequential playback — queues after current buffer | Timeline, render previews |
+| `mixPcm(pcm)` | `{ type: "mix", pcm }` | Additive mixing — sums into ring buffer at playback position | Voice streaming (keyboard) |
 
-Keyboard note previews bypass the ring buffer entirely:
+### Streaming Voice Preview
 
-1. User presses key → `note_preview` event sent to server (frequency + MIDI)
-2. Server renders 3 seconds of audio, returns binary frame with MIDI in byte 1
-3. Client creates `AudioBuffer` from PCM, plays via `AudioBufferSourceNode`
-4. Each note gets its own `GainNode` for independent fade-out
-5. On key release: `gain.setTargetAtTime(0, now, 0.015)` → ~45 ms fade → `source.stop()`
-6. Active notes tracked in `Map<midi, {source, gain}>` for re-trigger and release
-
-### Metronome (`useMetronome` hook)
-
-Count-in metronome generates clicks entirely in JavaScript (the only client-side audio generation):
-
-- Click sound: 1 kHz sine burst, 15 ms, exponential decay (`e^(-300t)`)
-- Pre-generated once as a `Float32Array` constant
-- `generateCountIn(opts)`: places clicks at even intervals across one bar
-- `playCountIn(feedPcm, opts)`: feeds entire count-in to AudioWorklet, returns Promise
-
----
-
-## Key Components
-
-### `ProjectList`
-
-Dashboard view: lists all projects, allows creating new ones with name and BPM.
-
-### `ProjectWorkspace`
-
-Top-level container for an active project:
-- Establishes shared WebSocket connection on mount
-- Manages local project state (mutable copy for settings editing)
-- Fetches ETag on mount for optimistic locking
-- Tab bar: Mixer / Design
-- Settings panel: BPM, time signature, count-in note value (saves via REST with ETag)
-
-### `SynthControls`
-
-Full synthesizer parameter UI with server-side rendering:
-
-**Sections**: Oscillator, Unison, Filter, LFO, Drive/Distortion, Chorus, Reverb, Volume
-
-**Rendering**:
-- Slider/select changes → debounced `patch_update` (150 ms)
-- "Render Sound" button → immediate `patch_update`
-- Keyboard notes → `note_preview` (no debounce)
-
-**Visualization**: Dual canvas displays updated via `requestAnimationFrame`:
-- **Spectrum**: 512 frequency bars, HSL-colored by frequency
-- **Oscilloscope**: 1024-sample waveform with center line
-
-**Event handling**:
-- `audio_buffer` → updates visualizations + feeds PCM to ring buffer
-- `note_audio` → creates AudioBufferSourceNode for the specific MIDI note
-
-### `Keyboard`
-
-Two-octave QWERTY piano keyboard (C3–B4, MIDI 48–71):
-
-**Key mapping**:
-```
-Lower octave (C3–B3): Z S X D C V G B H N J M
-Upper octave (C4–B4): Q 2 W 3 E R 5 T 6 Y 7 U
-```
-
-**Features**:
-- Keyboard and mouse input
-- Visual key highlighting for active notes
-- Global `keydown`/`keyup` listeners (skips `INPUT`/`TEXTAREA`/`SELECT` elements)
-- `NoteEvent` export: `{midi, note, frequency}`
-
-### `SampleRecorder`
-
-Recording workflow state machine:
+When a key is pressed on the keyboard, the frontend sends a `note_preview` message to the server. The server spawns a `VoiceStreamer` process that streams audio chunks back as `voice_audio` binary events.
 
 ```
-idle → count-in → recording → rendering → done
-  ▲                                         │
-  └─────────────────────────────────────────┘
-                  (re-record)
+Key press → note_preview (JSON) → Server spawns VoiceStreamer
+                                    ↓
+              voice_audio (binary, 200ms burst) → extract PCM → mixPcm()
+              voice_audio (binary, 50ms pace)   → extract PCM → mixPcm()
+              voice_audio (binary, 50ms pace)   → extract PCM → mixPcm()
+              ...
+Key release → key_up (JSON) → Server triggers ADSR release
+              voice_audio continues during release tail...
+              voice_done (JSON) → cleanup
 ```
 
-**Exposed via `forwardRef` + `useImperativeHandle`**: parent forwards keyboard `noteOn`/`noteOff` events.
+**Implementation** (`SynthControls.tsx`):
+- `voice_audio` handler: extracts FFT (offset 4, 512 bytes) and PCM (offset 516), calls `mixPcm()` for additive polyphonic playback
+- `handleNoteOff`: sends `key_up` to channel — no client-side fade-out, server handles release envelope
+- Multiple keys can be held simultaneously — each gets its own `VoiceStreamer` on the server
 
-**Recording process**:
-1. Click "Record" → wipes previous sample, enters count-in
-2. Metronome plays one bar of count-in clicks
-3. Recording phase starts — keyboard events captured with `performance.now()` timestamps
-4. Auto-stop after `barDurationMs × barCount` milliseconds
-5. Open notes are closed at the recording boundary
-6. `render_bar` event sent to server with note events + total duration
-7. Server renders polyphonically, returns `bar_audio` binary
-8. `LocalSample` created with PCM, FFT, input history, bar count
+### Timeline Playback
 
-**Configurable**: bar count (1, 2, 3, 4, 6, 8) and count-in grid (quarter/eighth/sixteenth).
+Timeline audio uses the burst & pace protocol via `UserSession` GenServer:
+1. `start_playback` → server renders 200 ms burst → `audio_frame` binary
+2. Server ticks every 50 ms → `audio_frame` binary chunks
+3. Client receives frames → `feedPcm()` for sequential playback
+4. `stop_playback` → server cancels timer
 
-### `PianoRoll`
+## State Management (Zustand)
 
-Canvas-based MIDI note visualization (600 × 384 px):
+### useProjectStore
+REST-backed project CRUD. Actions: `fetchProjects`, `createProject`, `updateProject` (with ETag), `deleteProject`.
 
-**Layout**:
-- Y axis: 24 pitch rows (C3–B4, MIDI 48–71), highest pitch at top
-- X axis: time (0 to total duration)
-- Left margin: 36 px for note name labels
+### useSocketStore
+Phoenix WebSocket lifecycle. Holds `socket`, `channel`, `connected`, `mixerState`. Registers all binary frame handlers (`audio_buffer`, `bar_audio`, `voice_audio`, `audio_frame`) and JSON event handlers (`slider_update`, `track_placed`, `presence_state`, etc.).
 
-**Visual elements**:
-- Row backgrounds: white keys vs. black keys (darker)
-- Subdivision grid lines (count-in note value resolution)
-- Beat lines (quarter note resolution, thicker)
-- Bar boundary lines (indigo, thick — for multi-bar recordings)
-- Note rectangles: colored by pitch (HSL hue based on MIDI), with borders
+### useDesignViewStore
+Multi-user synth state management. Each user has a view ID (`"design:{username}"`). State shape:
 
-**Playback**: button feeds `localSample.pcm` to AudioWorklet.
+```typescript
+designViews: Record<string, { synth_params: SynthParams }>
+activeViewId: string
+syncByView: Record<string, boolean>
+```
 
-### `SpectrumCanvas`
+Key actions:
+- `initFromServer(views)` — merges server state with `DEFAULT_SYNTH_PARAMS`
+- `patchView(viewId, params)` — optimistic local update
+- `handleRemoteUpdate(viewId, params)` — apply peer's changes
+- `getActiveParams()` — returns current view's SynthParams
 
-FFT spectrum visualizer used in the mixer view:
-- 512 frequency bars, HSL-colored
-- Updated via DOM property `_updateFft` (avoids React re-render)
-- `requestAnimationFrame` draw loop
+### useTimelineStore
+Timeline state: `tracks`, `playheadMs`, `playing`, `zoom`, `snapEnabled`, `snapResolution`, `selectedTrackIds`, `draggingByUser`, `userCursors`. Supports `batchMoveSelectedTracks` for multi-select drag.
 
-### `TrackStrip`
+### useCollabStore
+Collaboration: `localUser` (username + color), `remoteUsers`, `activeKeys` (Map of MIDI → remote players for keyboard collab visualization).
 
-Vertical mixer channel strip:
-- Volume fader (0–1)
-- Mute toggle
-- 3-band EQ: low, mid, high (±12 dB)
-- Debounced `slider_update` events (150 ms)
+## Keyboard
 
-### `MasterBus`
+`Keyboard.tsx` renders a 2-octave piano with QWERTY key mapping and octave switching (range 0–7, default 3).
 
-Master mixer controls:
-- Master volume fader
-- Play/Stop transport toggle
-- BPM display
+**Key mapping:**
+- Lower octave (baseOctave): `Z S X D C V G B H N J M`
+- Upper octave (baseOctave+1): `Q 2 W 3 E R 5 T 6 Y 7 U`
 
-### `SampleBrowser`
+`buildKeys(baseOctave)` generates `KeyDef[]` with MIDI numbers and frequencies (A4 = 440 Hz tuning). Octave switch buttons (−Oct / +Oct) let the user shift the entire keyboard.
 
-Paginated sample library browser:
-- Fetches from `GET /api/samples?page=N&limit=20`
-- Displays: name, genre, duration
-- Auto-loads page 1 on mount
+Input sources: `keydown`/`keyup` events + mouse interactions. Collaboration: colored dots show remote users' held keys via `useCollabStore`.
 
----
+## ADSR Envelope Component
 
-## Type System
+`AdsrEnvelope.tsx` renders an interactive ADSR visualization:
 
-All shared types are defined in `types/daw.ts`:
+- **Canvas** (320×100 + 16px label height): draws envelope shape with linear attack, exponential decay/release curves, grid background, phase labels (A/D/S/R)
+- **4 sliders**: Attack (ms), Decay (ms), Sustain (level 0–1), Release (ms) — time sliders use quadratic mapping for finer control at low values
+- **Accent colors**: Indigo for amp envelope, Yellow/Amber for filter envelope
+- **Optional**: Filter envelope depth slider (shown only on filter tab)
+- **Switchable**: AMP / FILTER tabs in the SynthControls panel
 
-**REST entities**: `Project`, `Track`, `Sample`, `Export`, `PaginatedResponse<T>`
+## Preset System
 
-**Mixer**: `TrackMixerState`, `EqSettings`, `MixerState`
+`synthPresets.ts` defines ~15 factory presets organized by category:
 
-**Audio**: `AudioFrame`, `SynthParams` (mirrors Rust `SynthState`)
-
-**Recording**: `RecordedNote`, `RecordingPhase`, `LocalSample`, `CountInNoteValue`
-
-**Helpers**: `decodeAudioFrame()`, `parseTimeSignature()`, `barDurationMs()`, `clicksPerBar()`
-
----
-
-## File Inventory
-
-| File | Purpose |
+| Category | Presets |
 |---|---|
-| `src/App.tsx` | Root component, project selection |
-| `src/main.tsx` | ReactDOM entry point |
-| `src/types/daw.ts` | All TypeScript type definitions |
-| `src/api/rest.ts` | REST API client functions |
-| `src/store/useProjectStore.ts` | Project list state |
-| `src/store/useSocketStore.ts` | WebSocket connection state |
-| `src/hooks/useAudioWorklet.ts` | AudioWorklet lifecycle |
-| `src/hooks/useMetronome.ts` | Count-in click generator |
-| `src/components/ProjectList.tsx` | Project dashboard |
-| `src/components/ProjectWorkspace.tsx` | Project container + settings |
-| `src/components/MixerView.tsx` | Mixer tab layout |
-| `src/components/SpectrumCanvas.tsx` | FFT canvas visualizer |
-| `src/components/SynthControls.tsx` | Synthesizer UI + keyboard |
-| `src/components/Keyboard.tsx` | QWERTY piano keyboard |
-| `src/components/Mixer/TrackStrip.tsx` | Channel strip |
-| `src/components/Mixer/MasterBus.tsx` | Master bus controls |
-| `src/components/Mixer/SampleBrowser.tsx` | Sample library browser |
-| `src/components/Design/DesignView.tsx` | Design tab layout |
-| `src/components/Design/SampleRecorder.tsx` | Recording state machine |
-| `src/components/Design/PianoRoll.tsx` | Note visualization canvas |
-| `public/audio-processor.js` | AudioWorklet ring buffer processor |
+| Basses | 808 Sub Bass, Dubstep Wub Bass |
+| Synths/Keys | Supersaw Chord, Synth Pluck |
+| Pads | Cinematic Pad |
+| Drums | Closed Hi-Hat, Synth Snare |
+
+Each preset is `Partial<SynthParams>` merged onto `DEFAULT_SYNTH_PARAMS`. `getPresetsByCategory()` returns a grouped Map for the preset selector dropdown. Selecting a preset calls `patchView()` + `sendParamSync()` to propagate to server and peers.
+
+## Parameter Sync Strategy
+
+Two separate WebSocket events handle synth parameter changes:
+
+| Event | Trigger | Server Action | Debounce |
+|---|---|---|---|
+| `sync_params` | Slider/knob adjustment | Merge params, broadcast to peers | 150 ms |
+| `patch_update` | "Render Sound" button | Merge params, render audio, return binary | None |
+
+This prevents unnecessary audio renders during live knob tweaking while keeping all clients in sync.
+
+## Canvas Rendering
+
+### FFT Spectrum (`AudioVisualization.tsx`)
+- Dual canvas: FFT bars (top) + oscilloscope waveform (bottom)
+- `requestAnimationFrame` loop reads latest FFT/PCM data from visualization callback
+- FFT: 512 bins mapped to canvas width, magnitude 0–255 → bar height
+- Oscilloscope: Float32 PCM → line graph
+
+### Piano Roll (`PianoRoll.tsx`)
+- Canvas grid: 24 rows (C3–B4), time axis in milliseconds
+- Recorded notes drawn as rectangles at grid positions
+- Grid lines at beat/bar boundaries based on BPM
+
+### Waveform Peaks (`TimelineClip.tsx`)
+- Each clip renders min/max amplitude peaks on a canvas
+- Peaks computed server-side via `generate_waveform_peaks` NIF
+
+## REST API Client
+
+`rest.ts` implements all REST endpoints with proper HTTP semantics:
+
+- **Optimistic locking**: `updateProject()` sends `If-Match` header with ETag, handles `412 Precondition Failed`
+- **Pagination**: `listSamples(page, limit)` for sample browser
+- **Multipart upload**: sample file upload
+- **Batch operations**: `batchMoveTracks()` for multi-select drag moves
+
+## SynthParams Type
+
+29 fields defined in `daw.ts`:
+
+| Group | Fields |
+|---|---|
+| Oscillator | `osc_shape`, `frequency` |
+| Unison | `unison_voices`, `unison_detune`, `unison_spread` |
+| Filter | `cutoff`, `resonance`, `filter_type` |
+| Drive | `drive`, `distortion_type`, `distortion_amount` |
+| LFO | `lfo_rate`, `lfo_depth`, `lfo_shape`, `lfo_target` |
+| Chorus | `chorus_rate`, `chorus_depth`, `chorus_mix` |
+| Reverb | `reverb_decay`, `reverb_mix` |
+| Amplitude | `volume` |
+| Amp ADSR | `amp_attack_ms`, `amp_decay_ms`, `amp_sustain`, `amp_release_ms` |
+| Filter ADSR | `filter_attack_ms`, `filter_decay_ms`, `filter_sustain`, `filter_release_ms`, `filter_env_depth` |
+
+### Defaults
+
+```typescript
+const DEFAULT_SYNTH_PARAMS: SynthParams = {
+  osc_shape: "saw", frequency: 440, unison_voices: 1, unison_detune: 15, unison_spread: 0.5,
+  cutoff: 2500, resonance: 0.3, filter_type: "svf",
+  drive: 1, distortion_type: "off", distortion_amount: 0,
+  lfo_rate: 2, lfo_depth: 0, lfo_shape: "sine", lfo_target: "cutoff",
+  chorus_rate: 1.5, chorus_depth: 0.3, chorus_mix: 0,
+  reverb_decay: 0.5, reverb_mix: 0,
+  volume: 0.7,
+  amp_attack_ms: 10, amp_decay_ms: 100, amp_sustain: 0.8, amp_release_ms: 200,
+  filter_attack_ms: 10, filter_decay_ms: 200, filter_sustain: 0.5, filter_release_ms: 300,
+  filter_env_depth: 2000,
+};
+```

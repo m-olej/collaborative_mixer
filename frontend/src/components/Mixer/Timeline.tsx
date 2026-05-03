@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Project, Track, Sample, SnapResolution } from "../../types/daw";
 import { parseTimeSignature } from "../../types/daw";
 import { useTimelineStore } from "../../store/useTimelineStore";
+import { useSocketStore } from "../../store/useSocketStore";
+import { useCollabStore } from "../../store/useCollabStore";
 import { TimelineLane } from "./TimelineLane";
 
 interface TimelineProps {
@@ -27,9 +29,18 @@ export function Timeline({ project, samples }: TimelineProps) {
     setSnap,
     fetchTracks,
     placeTrack,
+    playheadMs,
+    playing,
+    userCursors,
   } = useTimelineStore();
 
+  const { pushStartPlayback, pushStopPlayback, pushSeek } = useSocketStore();
+  const localColor = useCollabStore((s) => s.localUser.color);
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const animFrameRef = useRef<number>(0);
+  const playStartRef = useRef<{ wallMs: number; cursorMs: number }>({ wallMs: 0, cursorMs: 0 });
 
   useEffect(() => {
     fetchTracks(project.id);
@@ -49,6 +60,53 @@ export function Timeline({ project, samples }: TimelineProps) {
     beatsPerBar * msPerBeat * 8,
   );
   const totalWidth = Math.ceil(maxPositionMs * pxPerMs) + 200;
+
+  // ── Playhead animation ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!playing) {
+      cancelAnimationFrame(animFrameRef.current);
+      // Update the playhead position one last time when stopped.
+      if (playheadRef.current) {
+        playheadRef.current.style.left = `${playheadMs * pxPerMs}px`;
+      }
+      return;
+    }
+
+    playStartRef.current = { wallMs: performance.now(), cursorMs: playheadMs };
+
+    const tick = () => {
+      const elapsed = performance.now() - playStartRef.current.wallMs;
+      const currentMs = playStartRef.current.cursorMs + elapsed;
+      if (playheadRef.current) {
+        playheadRef.current.style.left = `${currentMs * pxPerMs}px`;
+      }
+      useTimelineStore.setState({ playheadMs: currentMs });
+      animFrameRef.current = requestAnimationFrame(tick);
+    };
+
+    animFrameRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animFrameRef.current);
+  }, [playing, pxPerMs]); // intentionally omit playheadMs to avoid restart loop
+
+  // ── Ruler seek-on-click ───────────────────────────────────────────────────
+  const handleRulerClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
+      const clickX = e.clientX - rect.left + scrollLeft;
+      const clickMs = Math.max(0, clickX / pxPerMs);
+
+      if (playing) {
+        // Seek while playing.
+        pushSeek(clickMs);
+        playStartRef.current = { wallMs: performance.now(), cursorMs: clickMs };
+      } else {
+        // Click to start playback from this position.
+        pushStartPlayback(clickMs);
+      }
+    },
+    [pxPerMs, playing, pushSeek, pushStartPlayback],
+  );
 
   // Group tracks by lane_index
   const laneMap = new Map<number, Track[]>();
@@ -184,14 +242,15 @@ export function Timeline({ project, samples }: TimelineProps) {
 
         {/* Scrollable grid + lanes */}
         <div ref={scrollRef} className="flex-1 overflow-auto">
-          <div style={{ width: totalWidth, minWidth: "100%" }}>
-            {/* Ruler */}
+          <div className="relative" style={{ width: totalWidth, minWidth: "100%" }}>
+            {/* Ruler (click to seek/play) */}
             <TimelineRuler
               totalWidth={totalWidth}
               msPerBeat={msPerBeat}
               beatsPerBar={beatsPerBar}
               pxPerMs={pxPerMs}
               height={RULER_HEIGHT}
+              onClick={handleRulerClick}
             />
 
             {/* Lanes */}
@@ -212,6 +271,43 @@ export function Timeline({ project, samples }: TimelineProps) {
                 onDragOver={handleDragOver}
               />
             ))}
+
+            {/* Playhead cursor (local) */}
+            <div
+              ref={playheadRef}
+              className="pointer-events-none absolute top-0 bottom-0 z-20 w-px"
+              style={{
+                left: `${playheadMs * pxPerMs}px`,
+                backgroundColor: localColor,
+              }}
+            >
+              <div
+                className="absolute -top-0 -left-1 h-2.5 w-2.5"
+                style={{
+                  backgroundColor: localColor,
+                  clipPath: "polygon(50% 100%, 0 0, 100% 0)",
+                }}
+              />
+            </div>
+
+            {/* Remote user cursors */}
+            {Object.entries(userCursors).map(([username, { color, cursor_ms }]) => (
+              <div
+                key={username}
+                className="pointer-events-none absolute top-0 bottom-0 z-10 w-px opacity-60"
+                style={{
+                  left: `${cursor_ms * pxPerMs}px`,
+                  backgroundColor: color,
+                }}
+              >
+                <span
+                  className="absolute -top-3.5 left-1 whitespace-nowrap rounded px-1 py-0.5 text-[8px] text-white"
+                  style={{ backgroundColor: color }}
+                >
+                  {username}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -229,12 +325,14 @@ function TimelineRuler({
   beatsPerBar,
   pxPerMs,
   height,
+  onClick,
 }: {
   totalWidth: number;
   msPerBeat: number;
   beatsPerBar: number;
   pxPerMs: number;
   height: number;
+  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
   const barMs = msPerBeat * beatsPerBar;
   const totalMs = totalWidth / pxPerMs;
@@ -242,8 +340,9 @@ function TimelineRuler({
 
   return (
     <div
-      className="relative border-b border-gray-700 bg-gray-950"
+      className="relative cursor-pointer border-b border-gray-700 bg-gray-950"
       style={{ width: totalWidth, height }}
+      onClick={onClick}
     >
       {Array.from({ length: bars }, (_, i) => {
         const x = i * barMs * pxPerMs;

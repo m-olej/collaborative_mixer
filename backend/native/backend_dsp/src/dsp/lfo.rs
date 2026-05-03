@@ -7,6 +7,7 @@
 use std::f32::consts::PI;
 
 /// LFO modulation target parameter.
+#[derive(PartialEq, Eq)]
 pub enum LfoTarget {
     Cutoff,
     Pitch,

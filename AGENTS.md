@@ -48,8 +48,15 @@ Browser (React + Web Audio API + Canvas)
         ↕  WebSocket (binary PCM/FFT) + REST JSON
 Elixir/Phoenix  (GenServer sessions + REST controllers)
         ↕  Rustler NIF call (in-process, no HTTP)
-Rust DSP Engine  (symphonia, biquad, rustfft, hound, rubato)
+Rust DSP Engine  (symphonia, biquad, rustfft, hound, rubato, fundsp)
 ```
+
+### Audio Pipelines
+
+The system has three audio pipelines:
+1. **Synth Render** (stateless) — "Render Sound" button, polyphonic bar rendering. DSP nodes created fresh per call.
+2. **Streaming Voice** (stateful, ResourceArc) — Keyboard note preview. `VoiceStreamer` GenServer per note, persistent DSP state (oscillator phase, ADSR, filters, effects). Burst & pace protocol (200 ms burst + 50 ms chunks).
+3. **Timeline Playback** (stateful, ResourceArc) — Mixer playback. `UserSession` pacing, `ProjectEngine` mmap-backed audio.
 
 ### Data stores
 
@@ -57,7 +64,7 @@ Rust DSP Engine  (symphonia, biquad, rustfft, hound, rubato)
 |------------|------------------|------------------------------------------------------|
 | PostgreSQL | Ecto + Postgrex  | Persistent: projects, tracks, samples metadata, exports |
 | MinIO      | ExAws + S3 API   | Object storage for audio files and exported WAVs     |
-| RAM (BEAM) | Elixir GenServer | Volatile: live mixer state (faders, EQ, playhead)    |
+| RAM (BEAM) | Elixir GenServer | Volatile: live mixer state (faders, EQ, playhead), per-view synth params (29 fields incl. ADSR) |
 
 ### Infrastructure (docker-compose)
 
@@ -76,8 +83,8 @@ backend   → port 4000  (Phoenix, HTTP only in dev)
 
 | Layer       | Protocol  | Carries                                                      |
 |-------------|-----------|--------------------------------------------------------------|
-| WebSocket   | Binary    | PCM Float32 audio frames, FFT Uint8 spectrum, slider state  |
-| WebSocket   | JSON text | Channel control messages (join, init_state, slider_update)  |
+| WebSocket   | Binary    | PCM Float32 audio frames, FFT Uint8 spectrum, voice streaming |
+| WebSocket   | JSON text | Channel control (join, init_state, slider_update, sync_params, design_view_update, note_preview, key_up) |
 | REST API    | JSON      | Persistent metadata: projects, tracks, samples, exports     |
 | REST API    | multipart | File upload for audio samples                               |
 | REST API    | binary    | Streaming download of exported WAV files                    |
@@ -92,8 +99,9 @@ All audio frames flowing from server to client use this exact binary layout (Lit
 
 | Offset     | Size     | JS Type         | Rust Type  | Content                              |
 |------------|----------|-----------------|------------|--------------------------------------|
-| 0          | 1 byte   | `Uint8`         | `u8`       | Message type ID (`1` = audio frame)  |
-| 1–3        | 3 bytes  | padding         | `[u8; 3]`  | Zero-padding for 4-byte alignment    |
+| 0          | 1 byte   | `Uint8`         | `u8`       | Message type ID (`1` = mixer, `2` = synth) |
+| 1          | 1 byte   | `Uint8`         | `u8`       | MIDI note (for voice_audio events, else 0) |
+| 2–3        | 2 bytes  | padding         | `[u8; 2]`  | Zero-padding for 4-byte alignment    |
 | 4–515      | 512 bytes| `Uint8Array(512)`| `[u8; 512]`| FFT spectrum (0–255 per bin)        |
 | 516+       | N×4 bytes| `Float32Array(N)`| `Vec<f32>` | PCM samples (−1.0 to 1.0)          |
 

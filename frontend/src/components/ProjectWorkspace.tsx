@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSocketStore } from "../store/useSocketStore";
+import { useDesignViewStore } from "../store/useDesignViewStore";
 import { MixerView } from "./MixerView";
 import { DesignView } from "./Design/DesignView";
 import { AudioVisualization, type AudioVisualizationHandle } from "./AudioVisualization";
@@ -11,6 +12,7 @@ type Tab = "mixer" | "design";
 
 interface ProjectWorkspaceProps {
   project: Project;
+  onBack: () => void;
 }
 
 /**
@@ -19,9 +21,12 @@ interface ProjectWorkspaceProps {
  * renders a tab bar for switching between the two modes.
  * Also manages editable project settings (BPM, time signature, count-in note value).
  */
-export function ProjectWorkspace({ project: initialProject }: ProjectWorkspaceProps) {
+export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<Tab>("mixer");
   const { connect, disconnect, connected, setVisualizationCallback, pushCursorMove } = useSocketStore();
+  const channel = useSocketStore((s) => s.channel);
+  const mixerSyncEnabled = useDesignViewStore((s) => s.syncByView["mixer"] ?? false);
+  const setSyncStore = useDesignViewStore((s) => s.setSync);
   const vizRef = useRef<AudioVisualizationHandle>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const cursorThrottleRef = useRef<number>(0);
@@ -101,6 +106,15 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
       <div className="flex items-end gap-0 border-b border-gray-800 px-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="mr-3 pb-3 pt-3 text-sm text-gray-400 hover:text-white"
+          title="Back to project list"
+        >
+          ← Projects
+        </button>
+        <div className="mr-1 self-stretch border-r border-gray-700" />
         <TabButton active={activeTab === "mixer"} onClick={() => setActiveTab("mixer")}>
           Mixer
         </TabButton>
@@ -108,8 +122,23 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
           Design
         </TabButton>
 
-        {/* Settings toggle + status */}
+        {/* Settings toggle + sync + status */}
         <div className="ml-auto flex items-center gap-3 pb-3">
+          {activeTab === "mixer" && (
+            <button
+              type="button"
+              onClick={setSyncStore.bind(null, "mixer", !mixerSyncEnabled)}
+              className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                mixerSyncEnabled
+                  ? "bg-green-600/80 text-white hover:bg-green-500"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+              title={mixerSyncEnabled ? "Hearing all users' audio" : "Hearing only your audio"}
+            >
+              <span className={`inline-block h-1.5 w-1.5 rounded-full ${mixerSyncEnabled ? "bg-green-300" : "bg-gray-600"}`} />
+              {mixerSyncEnabled ? "Sync On" : "Sync Off"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setSettingsOpen((o) => !o)}
@@ -130,6 +159,7 @@ export function ProjectWorkspace({ project: initialProject }: ProjectWorkspacePr
       {settingsOpen && (
         <ProjectSettings
           project={project}
+          key={project.id} // reset internal state when switching projects
           saving={saving}
           onSave={saveSettings}
         />
@@ -172,11 +202,11 @@ function ProjectSettings({ project, saving, onSave }: ProjectSettingsProps) {
   const [error, setError] = useState("");
 
   // Sync with parent project on change
-  useEffect(() => {
-    setBpm(project.bpm);
-    setTimeSignature(project.time_signature);
-    setCountInNoteValue(project.count_in_note_value ?? "quarter");
-  }, [project]);
+  // useEffect(() => {
+  //   setBpm(project.bpm);
+  //   setTimeSignature(project.time_signature);
+  //   setCountInNoteValue(project.count_in_note_value ?? "quarter");
+  // }, [project]);
 
   const handleSave = async () => {
     setError("");

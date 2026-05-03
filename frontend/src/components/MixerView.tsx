@@ -40,22 +40,26 @@ export function MixerView({ project }: MixerViewProps) {
     <div className="flex flex-col" style={{ height: "calc(100vh - 88px)" }}>
       {/* ── Main area ───────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
+
         {/* Left: Timeline + Track strips */}
         <div className="flex flex-1 flex-col overflow-hidden">
+
           {/* Timeline */}
-          <Timeline project={project} samples={samples} />
+          <div className="flex-1 overflow-hidden">
+            <Timeline project={project} samples={samples} />
+          </div>
 
           {/* Track strips */}
-          <div className="border-t border-gray-800">
-            <div className="border-b border-gray-800 px-4 py-2">
-              <p className="text-xs text-gray-500">
+          <div className="shrink-0 border-t border-gray-800 bg-black/20">
+            <div className="border-b border-gray-800 px-4 py-1">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
                 {trackIds.length === 0
                   ? "No tracks — drag samples from the library onto the timeline"
                   : `${trackIds.length} track${trackIds.length !== 1 ? "s" : ""}`}
               </p>
             </div>
 
-            <div className="flex gap-3 overflow-x-auto p-4" style={{ maxHeight: 220 }}>
+            <div className="flex gap-3 overflow-x-auto p-4">
               {trackIds.map((id) => (
                 <TrackStrip
                   key={id}

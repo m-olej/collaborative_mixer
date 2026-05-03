@@ -25,6 +25,8 @@ interface CollabState {
   localUser: CollabUser;
   remoteUsers: Record<string, RemoteUser>;
   localSelection: CollabSelection | null;
+  /** MIDI note → list of remote users currently holding that key. */
+  activeKeys: Record<number, { username: string; color: string }[]>;
 
   setLocalUser: (user: Partial<CollabUser>) => void;
   setRemoteUsers: (users: Record<string, RemoteUser>) => void;
@@ -32,12 +34,15 @@ interface CollabState {
   updateRemoteSelection: (username: string, color: string, selection: CollabSelection | null) => void;
   removeRemoteUser: (username: string) => void;
   setLocalSelection: (selection: CollabSelection | null) => void;
+  setKeyDown: (midi: number, username: string, color: string) => void;
+  setKeyUp: (midi: number, username: string) => void;
 }
 
 export const useCollabStore = create<CollabState>((set) => ({
   localUser: loadLocalUser(),
   remoteUsers: {},
   localSelection: null,
+  activeKeys: {},
 
   setLocalUser: (updates) =>
     set((s) => {
@@ -84,4 +89,26 @@ export const useCollabStore = create<CollabState>((set) => ({
     }),
 
   setLocalSelection: (selection) => set({ localSelection: selection }),
+
+  setKeyDown: (midi, username, color) =>
+    set((s) => {
+      const current = s.activeKeys[midi] ?? [];
+      // Avoid duplicates for same user.
+      if (current.some((u) => u.username === username)) return s;
+      return {
+        activeKeys: { ...s.activeKeys, [midi]: [...current, { username, color }] },
+      };
+    }),
+
+  setKeyUp: (midi, username) =>
+    set((s) => {
+      const current = s.activeKeys[midi];
+      if (!current) return s;
+      const filtered = current.filter((u) => u.username !== username);
+      if (filtered.length === 0) {
+        const { [midi]: _, ...rest } = s.activeKeys;
+        return { activeKeys: rest };
+      }
+      return { activeKeys: { ...s.activeKeys, [midi]: filtered } };
+    }),
 }));

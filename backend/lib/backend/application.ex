@@ -15,6 +15,7 @@ defmodule Backend.Application do
       BackendWeb.Presence,
       {Registry, keys: :unique, name: Backend.SessionRegistry},
       Backend.DawSession.SessionSupervisor,
+      Backend.DawSession.UserSessionSupervisor,
       # Start to serve requests, typically the last entry
       BackendWeb.Endpoint
     ]
