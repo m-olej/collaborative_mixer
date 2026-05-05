@@ -18,7 +18,7 @@ defmodule Backend.DawSession.VoiceStreamer do
   alias Backend.DSP
 
   @sample_rate 44_100
-  @burst_ms 200
+  @burst_ms 100
   @pace_ms 50
   @burst_samples div(@sample_rate * @burst_ms, 1000)
   @pace_samples div(@sample_rate * @pace_ms, 1000)

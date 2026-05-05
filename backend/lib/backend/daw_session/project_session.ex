@@ -112,6 +112,11 @@ defmodule Backend.DawSession.ProjectSession do
     GenServer.cast(via(project_id), :rebuild_timeline)
   end
 
+  @doc "Load a newly created track into the engine and rebuild the timeline."
+  def load_and_rebuild(project_id, track) do
+    GenServer.cast(via(project_id), {:load_and_rebuild, track})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -325,12 +330,51 @@ defmodule Backend.DawSession.ProjectSession do
     {:noreply, state}
   end
 
+  @impl true
+  def handle_cast({:load_and_rebuild, track}, state) do
+    session_name = via(state.project_id)
+    engine = state.engine
+
+    Task.start(fn ->
+      try do
+        case ExAws.S3.get_object("cloud-daw", track.s3_key)
+             |> ExAws.request() do
+          {:ok, %{body: body}} ->
+            Backend.DSP.decode_and_load_track(
+              engine,
+              track.id,
+              body,
+              track.position_ms,
+              0
+            )
+
+            case GenServer.whereis(session_name) do
+              nil -> :ok
+              pid -> send(pid, {:track_loaded, track.id})
+            end
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to download new track #{track.id} (#{track.s3_key}): #{inspect(reason)}"
+            )
+        end
+      rescue
+        e ->
+          Logger.warning("New track loading error for #{track.id}: #{Exception.message(e)}")
+      end
+    end)
+
+    {:noreply, state}
+  end
+
   # ── Info handlers ─────────────────────────────────────────────────────────
 
   @impl true
   def handle_info({:track_loaded, track_id}, state) do
     Logger.info("Track #{track_id} loaded into engine for project #{state.project_id}")
-    {:noreply, %{state | tracks_loaded: MapSet.put(state.tracks_loaded, track_id)}}
+    new_state = %{state | tracks_loaded: MapSet.put(state.tracks_loaded, track_id)}
+    do_rebuild_timeline(new_state)
+    {:noreply, new_state}
   end
 
   @impl true

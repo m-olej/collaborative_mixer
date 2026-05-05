@@ -141,12 +141,13 @@ class CloudDawProcessor extends AudioWorkletProcessor {
    * Per-voice additive mix into the ring buffer.
    *
    * Each voice has its own write cursor (stored in `_voices`).  The first
-   * chunk for a voice (burst) starts writing at the current `_writePos`.
-   * Subsequent chunks (pace) continue from where the previous chunk ended.
-   * Different voices overlap additively so polyphony works correctly.
+   * chunk for a voice (burst) starts writing at the current **read** position
+   * so that its audio plays immediately (overlapping with any other voices
+   * currently in the buffer).  Subsequent chunks (pace) continue from where
+   * the previous chunk ended, maintaining sequential continuity for that voice.
    *
    * When a voice's cursor falls behind the read pointer (already consumed),
-   * it is reset so the next chunk starts from the current write frontier.
+   * it is reset to the current read position.
    *
    * @param {number} midi MIDI note number (voice identifier)
    * @param {Float32Array} pcm Samples to mix in
@@ -159,9 +160,10 @@ class CloudDawProcessor extends AudioWorkletProcessor {
     let voicePos = this._voices.get(midi);
 
     // If the voice has no cursor, or its cursor is behind the read pointer
-    // (its audio was already consumed), start from the current write frontier.
+    // (its audio was already consumed), start from the current read position
+    // so audio plays as soon as possible (minimal latency).
     if (voicePos === undefined || !this._isAheadOfRead(voicePos)) {
-      voicePos = this._writePos;
+      voicePos = this._readPos;
     }
 
     // Mix the PCM samples into the ring at voicePos.
@@ -183,7 +185,7 @@ class CloudDawProcessor extends AudioWorkletProcessor {
     const newVoicePos = (voicePos + count) % CAPACITY;
     this._voices.set(midi, newVoicePos);
 
-    // Expand the global buffer extent if this voice wrote past _writePos.
+    // Expand the global buffer extent if this voice wrote past the current extent.
     const voiceEnd = (voicePos + count - this._readPos + CAPACITY) % CAPACITY;
     const currentExtent = this._available;
     if (voiceEnd > currentExtent) {

@@ -55,6 +55,8 @@ defmodule BackendWeb.SampleController do
       genre: sample.genre,
       s3_key: sample.s3_key,
       duration_ms: sample.duration_ms,
+      bar_count: sample.bar_count,
+      waveform_peaks: sample.waveform_peaks,
       inserted_at: sample.inserted_at
     }
   end

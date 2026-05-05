@@ -59,12 +59,15 @@ function drawEnvelope(
     ctx.stroke();
   }
 
-  // Time proportions — allocate canvas width based on ms durations
-  const totalMs = params.attack_ms + params.decay_ms + 500 + params.release_ms;
-  const aPx = (params.attack_ms / totalMs) * w;
-  const dPx = (params.decay_ms / totalMs) * w;
-  const sPx = (500 / totalMs) * w; // sustain hold visualization
-  const rPx = (params.release_ms / totalMs) * w;
+  // Time proportions — use fixed sustain display width so the envelope shape
+  // doesn't misleadingly change when adjusting A/D/R.
+  const SUSTAIN_DISPLAY_MS = 300;
+  const totalMs = params.attack_ms + params.decay_ms + SUSTAIN_DISPLAY_MS + params.release_ms;
+  const safeTotal = Math.max(totalMs, 1); // avoid division by zero
+  const aPx = (params.attack_ms / safeTotal) * w;
+  const dPx = (params.decay_ms / safeTotal) * w;
+  const sPx = (SUSTAIN_DISPLAY_MS / safeTotal) * w;
+  const rPx = (params.release_ms / safeTotal) * w;
 
   const x0 = PAD_X;
   const yBottom = PAD_Y + h;

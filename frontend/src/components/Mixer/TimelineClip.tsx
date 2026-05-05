@@ -48,6 +48,10 @@ export function TimelineClip({
     const canvas = waveformRef.current;
     if (!canvas || !sample?.waveform_peaks?.length) return;
 
+    // Match canvas internal resolution to displayed pixel width.
+    const displayWidth = Math.max(Math.round(widthPx), 20);
+    canvas.width = displayWidth;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -66,7 +70,7 @@ export function TimelineClip({
       const bottom = midY - min * midY * 0.9;
       ctx.fillRect(i * step, top, Math.max(step - 0.5, 0.5), bottom - top);
     }
-  }, [sample?.waveform_peaks]);
+  }, [sample?.waveform_peaks, widthPx]);
 
   const isMultiSelected = selectedTrackIds.has(track.id);
 
@@ -176,7 +180,6 @@ export function TimelineClip({
       {/* Waveform canvas */}
       <canvas
         ref={waveformRef}
-        width={200}
         height={Math.max(height - 18, 10)}
         className="w-full flex-1 px-0.5"
       />

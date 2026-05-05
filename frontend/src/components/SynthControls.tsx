@@ -40,13 +40,15 @@ interface SynthControlsProps {
   onNoteOn?: (event: NoteEvent) => void;
   /** Called on keyboard note-off (for recording workflow). */
   onNoteOff?: (event: NoteEvent) => void;
+  /** Called when the AudioWorklet AnalyserNode becomes available/unavailable. */
+  onAnalyserChange?: (analyser: AnalyserNode | null) => void;
 }
 
-export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteOff }: SynthControlsProps) {
+export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteOff, onAnalyserChange }: SynthControlsProps) {
   const params = useDesignViewStore((s) => s.designViews[viewId]?.synth_params ?? s.getActiveParams());
   const patchView = useDesignViewStore((s) => s.patchView);
   const channel = useSocketStore((s) => s.channel);
-  const { init: initWorklet, feedPcm, voicePcm, destroy: destroyWorklet } = useAudioWorklet();
+  const { init: initWorklet, feedPcm, voicePcm, getAnalyser, destroy: destroyWorklet } = useAudioWorklet();
   const [envTab, setEnvTab] = useState<"amp" | "filter">("amp");
   const [currentPreset, setCurrentPreset] = useState("");
 
@@ -58,9 +60,14 @@ export function SynthControls({ projectId: _projectId, viewId, onNoteOn, onNoteO
 
   // ── AudioWorklet lifecycle ────────────────────────────────────────────────
   useEffect(() => {
-    initWorklet();
-    return () => destroyWorklet();
-  }, [initWorklet, destroyWorklet]);
+    initWorklet().then(() => {
+      onAnalyserChange?.(getAnalyser());
+    });
+    return () => {
+      onAnalyserChange?.(null);
+      destroyWorklet();
+    };
+  }, [initWorklet, destroyWorklet, getAnalyser, onAnalyserChange]);
 
   // ── Canvas draw loop removed — visualization now handled by AudioVisualization ──
 

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Project, Sample } from "../types/daw";
 import { useSocketStore } from "../store/useSocketStore";
+import { useTimelineStore } from "../store/useTimelineStore";
 import { TrackStrip } from "./Mixer/TrackStrip";
 import { MasterBus } from "./Mixer/MasterBus";
 import { SampleBrowser } from "./Mixer/SampleBrowser";
@@ -28,11 +29,19 @@ interface MixerViewProps {
 export function MixerView({ project }: MixerViewProps) {
   const { channel, mixerState } = useSocketStore();
   const [samples, setSamples] = useState<Sample[]>([]);
+  const tracks = useTimelineStore((s) => s.tracks);
 
-  // Load samples for timeline waveform rendering
-  useEffect(() => {
-    api.listSamples(1, 100).then((res) => setSamples(res.data));
+  // Refresh the sample cache from the REST API.
+  const refreshSamples = useCallback(() => {
+    api.listSamples(1, 200).then((res) => setSamples(res.data));
   }, []);
+
+  // Load samples on mount.
+  useEffect(() => { refreshSamples(); }, [refreshSamples]);
+
+  // Re-fetch samples whenever the track list changes (a new track may reference
+  // a sample that wasn't in the cache yet).
+  useEffect(() => { refreshSamples(); }, [tracks.length, refreshSamples]);
 
   const trackIds = mixerState ? Object.keys(mixerState.tracks) : [];
 

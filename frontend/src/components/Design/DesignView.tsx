@@ -14,6 +14,8 @@ interface DesignViewProps {
   bpm: number;
   timeSignature: string;
   countInNoteValue: CountInNoteValue;
+  /** Called when the SynthControls AnalyserNode becomes available/unavailable. */
+  onAnalyserChange?: (analyser: AnalyserNode | null) => void;
 }
 
 interface SaveState {
@@ -34,7 +36,7 @@ interface SaveState {
  *  │  Keyboard                │  - Save to Library      │
  *  └──────────────────────────┴─────────────────────────┘
  */
-export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: initialCountIn }: DesignViewProps) {
+export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: initialCountIn, onAnalyserChange }: DesignViewProps) {
   const channel = useSocketStore((s) => s.channel);
   const { feedPcm } = useAudioWorklet();
 
@@ -225,6 +227,7 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
           viewId={currentViewId}
           onNoteOn={isOwnView ? handleNoteOn : undefined}
           onNoteOff={isOwnView ? handleNoteOff : undefined}
+          onAnalyserChange={onAnalyserChange}
         />
       </div>
 

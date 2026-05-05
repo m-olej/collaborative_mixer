@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSocketStore } from "../store/useSocketStore";
 import { useDesignViewStore } from "../store/useDesignViewStore";
+import { useTimelineStore } from "../store/useTimelineStore";
 import { MixerView } from "./MixerView";
 import { DesignView } from "./Design/DesignView";
 import { AudioVisualization, type AudioVisualizationHandle } from "./AudioVisualization";
 import { CursorOverlay } from "./Collaboration/CursorOverlay";
+import { HelpLegend } from "./HelpLegend";
 import { api } from "../api/rest";
 import type { Project, CountInNoteValue } from "../types/daw";
 
@@ -99,6 +101,32 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
     [project.id, etag],
   );
 
+  // Forward AnalyserNode from SynthControls to AudioVisualization.
+  const handleAnalyserChange = useCallback((analyser: AnalyserNode | null) => {
+    vizRef.current?.setAnalyser(analyser);
+  }, []);
+
+  // Space bar for play/stop (only in mixer tab to avoid conflicts with synth keyboard).
+  const { pushStartPlayback, pushStopPlayback } = useSocketStore();
+  useEffect(() => {
+    if (activeTab !== "mixer") return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input or textarea.
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        const playing = useTimelineStore.getState().playing;
+        if (playing) {
+          pushStopPlayback();
+        } else {
+          pushStartPlayback(useTimelineStore.getState().playheadMs);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeTab, pushStartPlayback, pushStopPlayback]);
+
   return (
     <div ref={workspaceRef} className="relative flex min-h-0 flex-1 flex-col">
       {/* ── Cursor overlay ──────────────────────────────────────────── */}
@@ -146,6 +174,7 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
           >
             ⚙ Settings
           </button>
+          <HelpLegend />
           <div
             className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-400"}`}
           />
@@ -177,6 +206,7 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
           bpm={project.bpm}
           timeSignature={project.time_signature}
           countInNoteValue={project.count_in_note_value ?? "quarter"}
+          onAnalyserChange={handleAnalyserChange}
         />
       )}
     </div>

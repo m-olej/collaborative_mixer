@@ -54,6 +54,11 @@ defmodule BackendWeb.TrackController do
         %{track: track_json(track)}
       )
 
+      # Load the new track's audio into the DSP engine and rebuild the timeline.
+      if GenServer.whereis({:via, Registry, {Backend.SessionRegistry, project_id}}) do
+        Backend.DawSession.ProjectSession.load_and_rebuild(project_id, track)
+      end
+
       conn
       |> put_status(201)
       |> put_resp_header("etag", "\"#{Projects.track_etag(track)}\"")

@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import type { Channel } from "phoenix";
 import type { EqSettings, TrackMixerState } from "../../types/daw";
+import { useTimelineStore } from "../../store/useTimelineStore";
 
 /** Debounce delay for continuous controls (volume, EQ). */
 const DEBOUNCE_MS = 150;
@@ -30,15 +31,27 @@ export function TrackStrip({ trackId, initial, channel }: TrackStripProps) {
   const [solo, setSolo] = useState(initial.solo ?? false);
   const [pan, setPan] = useState(initial.pan ?? 0);
   const [eq, setEq] = useState<EqSettings>(initial.eq);
+  const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Push a slider_update payload merged with the track_id.
+  const isSelected = selectedTrackIds.has(Number(trackId));
+
+  // Push a slider_update for this track, and also for all other selected tracks
+  // when this track is in the selection.
   const sendSlider = useCallback(
     (payload: Record<string, unknown>) => {
       channel?.push("slider_update", { track_id: trackId, ...payload });
+      if (isSelected) {
+        for (const id of selectedTrackIds) {
+          const idStr = String(id);
+          if (idStr !== trackId) {
+            channel?.push("slider_update", { track_id: idStr, ...payload });
+          }
+        }
+      }
     },
-    [channel, trackId],
+    [channel, trackId, isSelected, selectedTrackIds],
   );
 
   const handleVolume = useCallback(
@@ -92,7 +105,7 @@ export function TrackStrip({ trackId, initial, channel }: TrackStripProps) {
   return (
     <div
       className={`flex w-32 shrink-0 flex-col gap-3 rounded-lg border bg-gray-900 px-3 py-4
-        ${muted ? "border-yellow-700 opacity-60" : "border-gray-700"}`}
+        ${muted ? "border-yellow-700 opacity-60" : isSelected ? "border-indigo-500" : "border-gray-700"}`}
     >
       {/* Track label */}
       <p className="truncate text-center text-xs font-semibold text-gray-300">
