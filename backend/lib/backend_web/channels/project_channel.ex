@@ -30,6 +30,8 @@ defmodule BackendWeb.ProjectChannel do
   """
   use BackendWeb, :channel
 
+  require Logger
+
   alias Backend.DawSession.ProjectSession
   alias Backend.DawSession.UserSessionSupervisor
   alias Backend.DawSession.UserSession
@@ -40,6 +42,8 @@ defmodule BackendWeb.ProjectChannel do
   def join("project:" <> project_id, payload, socket) do
     case Integer.parse(project_id) do
       {id, ""} ->
+        Logger.debug("[ProjectChannel] join project=#{id} payload=#{inspect(payload)}")
+
         # Ensure a session GenServer is running for this project.
         # `ensure_started` is idempotent: returns the existing PID if already up.
         ProjectSession.ensure_started(id)
@@ -225,6 +229,11 @@ defmodule BackendWeb.ProjectChannel do
     view_id = Map.get(payload, "view_id")
     genre = Map.get(payload, "genre")
     input_history = Map.get(payload, "input_history")
+
+    Logger.debug(
+      "[ProjectChannel] save_sample name=#{name} genre=#{inspect(genre)} view=#{inspect(view_id)} project=#{project_id}"
+    )
+
     # Ecto :map requires a map, but the frontend sends an array of notes.
     # Wrap it so the jsonb column gets a proper map.
     input_history_map =
@@ -248,15 +257,22 @@ defmodule BackendWeb.ProjectChannel do
     waveform_peaks =
       case Backend.DawSession.ProjectSession.get_last_bar_render(project_id, view_id) do
         {:ok, pcm_binary} when is_binary(pcm_binary) ->
+          Logger.debug(
+            "[ProjectChannel] generating waveform peaks from #{byte_size(pcm_binary)} bytes PCM"
+          )
+
           case Backend.DSP.generate_waveform_peaks(pcm_binary, 200) do
             peaks when is_list(peaks) ->
+              Logger.debug("[ProjectChannel] waveform peaks generated: #{length(peaks)} bins")
               Enum.map(peaks, fn {min_v, max_v} -> %{"min" => min_v, "max" => max_v} end)
 
-            _ ->
+            other ->
+              Logger.debug("[ProjectChannel] waveform peaks unexpected: #{inspect(other)}")
               nil
           end
 
-        _ ->
+        other ->
+          Logger.debug("[ProjectChannel] no last_bar_render for peaks: #{inspect(other)}")
           nil
       end
 
@@ -269,6 +285,32 @@ defmodule BackendWeb.ProjectChannel do
       "bar_count" => bar_count,
       "waveform_peaks" => waveform_peaks
     }
+
+    # Upload the rendered audio to MinIO so it can be loaded by the timeline engine.
+    upload_result =
+      case Backend.DawSession.ProjectSession.get_last_bar_render(project_id, view_id) do
+        {:ok, pcm_binary} when is_binary(pcm_binary) ->
+          wav_binary = encode_wav_f32(pcm_binary, 44_100)
+
+          Logger.debug(
+            "[ProjectChannel] uploading sample to S3 key=#{s3_key} wav_size=#{byte_size(wav_binary)} bytes"
+          )
+
+          ExAws.S3.put_object("cloud-daw", s3_key, wav_binary, content_type: "audio/wav")
+          |> ExAws.request()
+
+        _ ->
+          Logger.debug("[ProjectChannel] no PCM audio to upload for sample #{name}")
+          {:error, :no_audio}
+      end
+
+    case upload_result do
+      {:ok, _} ->
+        Logger.debug("[ProjectChannel] S3 upload OK for #{s3_key}")
+
+      {:error, reason} ->
+        Logger.warning("[ProjectChannel] S3 upload FAILED for #{s3_key}: #{inspect(reason)}")
+    end
 
     case Backend.Samples.create_sample(attrs) do
       {:ok, sample} ->
@@ -295,6 +337,10 @@ defmodule BackendWeb.ProjectChannel do
     username = socket.assigns.username
     view_id = "mixer"
 
+    Logger.debug(
+      "[ProjectChannel] start_playback user=#{username} cursor=#{cursor_ms}ms project=#{project_id}"
+    )
+
     UserSession.start_playback(project_id, username, cursor_ms, view_id)
     {:noreply, socket}
   end
@@ -304,6 +350,7 @@ defmodule BackendWeb.ProjectChannel do
     project_id = socket.assigns.project_id
     username = socket.assigns.username
 
+    Logger.debug("[ProjectChannel] stop_playback user=#{username} project=#{project_id}")
     UserSession.stop_playback(project_id, username)
     {:noreply, socket}
   end
@@ -313,6 +360,10 @@ defmodule BackendWeb.ProjectChannel do
     project_id = socket.assigns.project_id
     username = socket.assigns.username
     view_id = "mixer"
+
+    Logger.debug(
+      "[ProjectChannel] seek user=#{username} cursor=#{cursor_ms}ms project=#{project_id}"
+    )
 
     UserSession.seek(project_id, username, cursor_ms, view_id)
     {:noreply, socket}
@@ -468,7 +519,41 @@ defmodule BackendWeb.ProjectChannel do
   # Receive timeline audio frames from UserSession (burst & pace protocol).
   @impl true
   def handle_info({:deliver_audio, _view_id, binary_frame}, socket) do
+    Logger.debug(
+      "[ProjectChannel] deliver_audio #{byte_size(binary_frame)} bytes to user=#{socket.assigns.username}"
+    )
+
     push(socket, "audio_frame", {:binary, binary_frame})
+    {:noreply, socket}
+  end
+
+  # Playback auto-stopped (cursor passed all clips).
+  @impl true
+  def handle_info(:playback_ended, socket) do
+    Logger.debug("[ProjectChannel] playback_ended for user=#{socket.assigns.username}")
+    push(socket, "playback_ended", %{})
+    {:noreply, socket}
+  end
+
+  # Periodic playhead sync from UserSession (every ~500 ms during playback).
+  @impl true
+  def handle_info({:playhead_sync, cursor_ms}, socket) do
+    Logger.debug(
+      "[ProjectChannel] playhead_sync cursor=#{cursor_ms}ms user=#{socket.assigns.username}"
+    )
+
+    push(socket, "playhead_sync", %{cursor_ms: cursor_ms})
+    {:noreply, socket}
+  end
+
+  # Track loading progress from ProjectSession.
+  @impl true
+  def handle_info({:track_loading_progress, loaded_count}, socket) do
+    Logger.debug(
+      "[ProjectChannel] track_loading_progress loaded=#{loaded_count} user=#{socket.assigns.username}"
+    )
+
+    push(socket, "track_loading_progress", %{loaded_count: loaded_count})
     {:noreply, socket}
   end
 
@@ -509,5 +594,40 @@ defmodule BackendWeb.ProjectChannel do
         active_voices = Map.delete(socket.assigns.active_voices, midi)
         assign(socket, :active_voices, active_voices)
     end
+  end
+
+  # Encode raw f32 PCM binary as a WAV file (IEEE Float format).
+  # This produces a valid WAV container that symphonia can decode.
+  defp encode_wav_f32(pcm_binary, sample_rate) do
+    num_channels = 1
+    bits_per_sample = 32
+    byte_rate = sample_rate * num_channels * div(bits_per_sample, 8)
+    block_align = num_channels * div(bits_per_sample, 8)
+    data_size = byte_size(pcm_binary)
+    # RIFF header size = 4 (WAVE) + 24 (fmt chunk) + 8 (data chunk header)
+    riff_size = 4 + 24 + 8 + data_size
+
+    # RIFF header
+    header =
+      <<
+        "RIFF",
+        riff_size::little-32,
+        "WAVE",
+        # fmt sub-chunk
+        "fmt ",
+        16::little-32,
+        # AudioFormat: 3 = IEEE Float
+        3::little-16,
+        num_channels::little-16,
+        sample_rate::little-32,
+        byte_rate::little-32,
+        block_align::little-16,
+        bits_per_sample::little-16,
+        # data sub-chunk
+        "data",
+        data_size::little-32
+      >>
+
+    header <> pcm_binary
   end
 end

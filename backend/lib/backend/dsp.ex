@@ -211,6 +211,14 @@ defmodule Backend.DSP do
   def rebuild_timeline(_engine, _clips), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Get the end timestamp (ms) of the last clip on the timeline.
+
+  Returns 0 if the timeline is empty.  Used for auto-stop when the
+  playhead passes all clips.
+  """
+  def get_timeline_end(_engine), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Update per-track mixing parameters (volume, mute, pan).
 
   Called on every slider_update event.  Fast path — no DirtyCpu.

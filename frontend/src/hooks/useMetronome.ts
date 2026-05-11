@@ -14,7 +14,7 @@ import { useCallback, useRef } from "react";
 import type { CountInNoteValue } from "../types/daw";
 import { barDurationMs, clicksPerBar } from "../types/daw";
 
-const SAMPLE_RATE = 44100;
+const SAMPLE_RATE = 48000;
 const CLICK_DURATION_MS = 15;
 const CLICK_FREQUENCY = 1000; // Hz
 const CLICK_SAMPLES = Math.ceil(SAMPLE_RATE * (CLICK_DURATION_MS / 1000));

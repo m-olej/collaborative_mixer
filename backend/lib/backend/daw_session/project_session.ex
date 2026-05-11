@@ -112,6 +112,11 @@ defmodule Backend.DawSession.ProjectSession do
     GenServer.cast(via(project_id), :rebuild_timeline)
   end
 
+  @doc "Get the end timestamp (ms) of the last clip on the timeline."
+  def get_timeline_end(project_id) do
+    GenServer.call(via(project_id), :get_timeline_end)
+  end
+
   @doc "Load a newly created track into the engine and rebuild the timeline."
   def load_and_rebuild(project_id, track) do
     GenServer.cast(via(project_id), {:load_and_rebuild, track})
@@ -123,27 +128,38 @@ defmodule Backend.DawSession.ProjectSession do
 
   @impl true
   def init(project_id) do
+    Logger.debug("[ProjectSession] init project_id=#{project_id}")
+
     # Initialize the Rust timeline engine.
     engine =
       case Backend.DSP.init_engine(project_id) do
         {:ok, ref} ->
+          Logger.debug("[ProjectSession] engine init OK (wrapped) project_id=#{project_id}")
           ref
 
         ref when is_reference(ref) ->
+          Logger.debug("[ProjectSession] engine init OK (ref) project_id=#{project_id}")
           ref
 
         other ->
+          Logger.debug(
+            "[ProjectSession] engine init returned #{inspect(other)} project_id=#{project_id}"
+          )
+
           # ResourceArc returns the ref directly (not wrapped in {:ok, ...})
           other
       end
 
     # Fire async tasks to download + decode all project tracks from S3.
+    Logger.debug("[ProjectSession] spawning track loading for project_id=#{project_id}")
     spawn_track_loading(project_id, engine)
 
     state = %{
       project_id: project_id,
       engine: engine,
       tracks_loaded: MapSet.new(),
+      # Duration in ms per loaded track: %{track_id => duration_ms}
+      track_durations: %{},
       # Active users: %{username => channel_pid}
       active_users: %{},
       # Per-user design views: %{view_id => %{synth_params, last_bar_render, ...}}
@@ -194,13 +210,43 @@ defmodule Backend.DawSession.ProjectSession do
   # ── Timeline chunk mixing ────────────────────────────────────────────────
 
   @impl true
+  def handle_call(:get_timeline_end, _from, state) do
+    end_ms =
+      try do
+        result = Backend.DSP.get_timeline_end(state.engine)
+        Logger.debug("[ProjectSession] get_timeline_end=#{result} project=#{state.project_id}")
+        result
+      rescue
+        e ->
+          Logger.debug("[ProjectSession] get_timeline_end error: #{Exception.message(e)}")
+          0
+      end
+
+    {:reply, end_ms, state}
+  end
+
+  @impl true
   def handle_call({:mix_chunk, start_ms, duration_ms}, _from, state) do
+    # NIF expects integer arguments (u64, u32) — round any floats from the client.
+    int_start = round(start_ms)
+    int_dur = round(duration_ms)
+
     result =
       try do
-        binary = Backend.DSP.mix_chunk(state.engine, start_ms, duration_ms)
+        binary = Backend.DSP.mix_chunk(state.engine, int_start, int_dur)
+
+        Logger.debug(
+          "[ProjectSession] mix_chunk start=#{int_start}ms dur=#{int_dur}ms -> #{byte_size(binary)} bytes, project=#{state.project_id}"
+        )
+
         {:ok, binary}
       rescue
-        e -> {:error, Exception.message(e)}
+        e ->
+          Logger.debug(
+            "[ProjectSession] mix_chunk ERROR start=#{int_start}ms dur=#{int_dur}ms: #{Exception.message(e)}"
+          )
+
+          {:error, Exception.message(e)}
       end
 
     {:reply, result, state}
@@ -332,35 +378,57 @@ defmodule Backend.DawSession.ProjectSession do
 
   @impl true
   def handle_cast({:load_and_rebuild, track}, state) do
+    Logger.debug(
+      "[ProjectSession] load_and_rebuild track_id=#{track.id} s3_key=#{track.s3_key} position=#{track.position_ms}ms project=#{state.project_id}"
+    )
+
     session_name = via(state.project_id)
     engine = state.engine
 
     Task.start(fn ->
       try do
+        Logger.debug("[ProjectSession] downloading from S3: #{track.s3_key}")
+
         case ExAws.S3.get_object("cloud-daw", track.s3_key)
              |> ExAws.request() do
           {:ok, %{body: body}} ->
-            Backend.DSP.decode_and_load_track(
-              engine,
-              track.id,
-              body,
-              track.position_ms,
-              0
+            Logger.debug(
+              "[ProjectSession] S3 download OK for track #{track.id}, #{byte_size(body)} bytes. Decoding..."
+            )
+
+            duration_ms =
+              Backend.DSP.decode_and_load_track(
+                engine,
+                track.id,
+                body,
+                track.position_ms,
+                0
+              )
+
+            Logger.debug(
+              "[ProjectSession] decode_and_load_track OK track_id=#{track.id} duration=#{duration_ms}ms"
             )
 
             case GenServer.whereis(session_name) do
-              nil -> :ok
-              pid -> send(pid, {:track_loaded, track.id})
+              nil ->
+                Logger.debug(
+                  "[ProjectSession] session gone, cannot notify track_loaded for #{track.id}"
+                )
+
+              pid ->
+                send(pid, {:track_loaded, track.id, duration_ms})
             end
 
           {:error, reason} ->
             Logger.warning(
-              "Failed to download new track #{track.id} (#{track.s3_key}): #{inspect(reason)}"
+              "[ProjectSession] S3 download FAILED track #{track.id} (#{track.s3_key}): #{inspect(reason)}"
             )
         end
       rescue
         e ->
-          Logger.warning("New track loading error for #{track.id}: #{Exception.message(e)}")
+          Logger.warning(
+            "[ProjectSession] load_and_rebuild ERROR track #{track.id}: #{Exception.message(e)}"
+          )
       end
     end)
 
@@ -369,6 +437,35 @@ defmodule Backend.DawSession.ProjectSession do
 
   # ── Info handlers ─────────────────────────────────────────────────────────
 
+  @impl true
+  def handle_info({:track_loaded, track_id, duration_ms}, state) do
+    Logger.info(
+      "[ProjectSession] track_loaded track_id=#{track_id} duration=#{duration_ms}ms project=#{state.project_id} total_loaded=#{MapSet.size(state.tracks_loaded) + 1}"
+    )
+
+    new_state = %{
+      state
+      | tracks_loaded: MapSet.put(state.tracks_loaded, track_id),
+        track_durations: Map.put(state.track_durations, track_id, duration_ms)
+    }
+
+    do_rebuild_timeline(new_state)
+
+    # Broadcast loading progress to all connected users.
+    for {_username, channel_pid} <- new_state.active_users do
+      if Process.alive?(channel_pid) do
+        Logger.debug(
+          "[ProjectSession] sending track_loading_progress loaded=#{MapSet.size(new_state.tracks_loaded)}"
+        )
+
+        send(channel_pid, {:track_loading_progress, MapSet.size(new_state.tracks_loaded)})
+      end
+    end
+
+    {:noreply, new_state}
+  end
+
+  # Legacy: support old-style {:track_loaded, track_id} without duration (backwards compat).
   @impl true
   def handle_info({:track_loaded, track_id}, state) do
     Logger.info("Track #{track_id} loaded into engine for project #{state.project_id}")
@@ -395,34 +492,58 @@ defmodule Backend.DawSession.ProjectSession do
     Task.start(fn ->
       tracks = Backend.Projects.list_tracks(project_id)
 
+      Logger.debug(
+        "[ProjectSession] spawn_track_loading: #{length(tracks)} tracks to load for project=#{project_id}"
+      )
+
       Enum.each(tracks, fn track ->
         Task.start(fn ->
           try do
+            Logger.debug(
+              "[ProjectSession] loading track_id=#{track.id} s3_key=#{track.s3_key} position=#{track.position_ms}ms"
+            )
+
             case ExAws.S3.get_object("cloud-daw", track.s3_key)
                  |> ExAws.request() do
               {:ok, %{body: body}} ->
-                Backend.DSP.decode_and_load_track(
-                  engine,
-                  track.id,
-                  body,
-                  track.position_ms,
-                  0
+                Logger.debug(
+                  "[ProjectSession] S3 OK track_id=#{track.id} size=#{byte_size(body)} bytes, decoding..."
+                )
+
+                duration_ms =
+                  Backend.DSP.decode_and_load_track(
+                    engine,
+                    track.id,
+                    body,
+                    track.position_ms,
+                    0
+                  )
+
+                Logger.debug(
+                  "[ProjectSession] decoded track_id=#{track.id} duration=#{duration_ms}ms"
                 )
 
                 # Notify the ProjectSession that this track is ready.
                 case GenServer.whereis(session_name) do
-                  nil -> :ok
-                  pid -> send(pid, {:track_loaded, track.id})
+                  nil ->
+                    Logger.debug(
+                      "[ProjectSession] session gone, skipping track_loaded for #{track.id}"
+                    )
+
+                  pid ->
+                    send(pid, {:track_loaded, track.id, duration_ms})
                 end
 
               {:error, reason} ->
                 Logger.warning(
-                  "Failed to download track #{track.id} (#{track.s3_key}): #{inspect(reason)}"
+                  "[ProjectSession] S3 FAILED track_id=#{track.id} (#{track.s3_key}): #{inspect(reason)}"
                 )
             end
           rescue
             e ->
-              Logger.warning("Track loading error for #{track.id}: #{Exception.message(e)}")
+              Logger.warning(
+                "[ProjectSession] track load ERROR track_id=#{track.id}: #{Exception.message(e)}"
+              )
           end
         end)
       end)
@@ -436,21 +557,28 @@ defmodule Backend.DawSession.ProjectSession do
     clips =
       Enum.filter(tracks, fn t -> MapSet.member?(state.tracks_loaded, t.id) end)
       |> Enum.map(fn t ->
+        # Use the actual decoded duration if available, otherwise fall back to
+        # a generous default so the clip isn't silently truncated.
+        duration_ms = Map.get(state.track_durations, t.id, 300_000)
+
         %{
           clip_id: t.id,
           track_id: t.id,
           start_ms: t.position_ms,
-          # Approximate end; real end is computed from decoded duration.
-          # For loaded tracks the engine already has the accurate clip.
-          end_ms: t.position_ms + 300_000,
+          end_ms: t.position_ms + duration_ms,
           source_offset_ms: 0
         }
       end)
 
+    Logger.debug(
+      "[ProjectSession] rebuild_timeline project=#{state.project_id} db_tracks=#{length(tracks)} loaded_clips=#{length(clips)} clips=#{inspect(Enum.map(clips, fn c -> %{id: c.clip_id, start: c.start_ms, end: c.end_ms} end))}"
+    )
+
     try do
       Backend.DSP.rebuild_timeline(state.engine, clips)
+      Logger.debug("[ProjectSession] rebuild_timeline OK project=#{state.project_id}")
     rescue
-      e -> Logger.warning("rebuild_timeline failed: #{Exception.message(e)}")
+      e -> Logger.warning("[ProjectSession] rebuild_timeline FAILED: #{Exception.message(e)}")
     end
   end
 
@@ -473,10 +601,15 @@ defmodule Backend.DawSession.ProjectSession do
       end)
 
     if params != [] do
+      Logger.debug(
+        "[ProjectSession] sync_track_params_to_engine #{length(params)} tracks: #{inspect(params)}"
+      )
+
       try do
         Backend.DSP.set_track_params(state.engine, params)
       rescue
-        _ -> :ok
+        e ->
+          Logger.debug("[ProjectSession] set_track_params ERROR: #{Exception.message(e)}")
       end
     end
   end

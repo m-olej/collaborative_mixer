@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSocketStore } from "../store/useSocketStore";
 import { useDesignViewStore } from "../store/useDesignViewStore";
 import { useTimelineStore } from "../store/useTimelineStore";
+import { useAudioWorklet } from "../hooks/useAudioWorklet";
 import { MixerView } from "./MixerView";
 import { DesignView } from "./Design/DesignView";
 import { AudioVisualization, type AudioVisualizationHandle } from "./AudioVisualization";
@@ -25,13 +26,16 @@ interface ProjectWorkspaceProps {
  */
 export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<Tab>("mixer");
-  const { connect, disconnect, connected, setVisualizationCallback, pushCursorMove } = useSocketStore();
+  const { connect, disconnect, connected, setVisualizationCallback, setAudioCallback, setClearAudioCallback, pushCursorMove } = useSocketStore();
   const channel = useSocketStore((s) => s.channel);
   const mixerSyncEnabled = useDesignViewStore((s) => s.syncByView["mixer"] ?? false);
   const setSyncStore = useDesignViewStore((s) => s.setSync);
   const vizRef = useRef<AudioVisualizationHandle>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const cursorThrottleRef = useRef<number>(0);
+
+  // AudioWorklet for mixer playback (separate from synth worklet in DesignView).
+  const { init: initWorklet, feedPcm, clearBuffer, destroy: destroyWorklet } = useAudioWorklet();
 
   // Local mutable project state for settings editing.
   const [project, setProject] = useState<Project>(initialProject);
@@ -50,16 +54,33 @@ export function ProjectWorkspace({ project: initialProject, onBack }: ProjectWor
   // Single connection shared across tabs — established here so switching
   // tabs does NOT tear down and re-create the WebSocket.
   useEffect(() => {
+    // Initialize AudioWorklet for mixer playback (48kHz, matches Rust engine).
+    initWorklet();
+
     // Wire visualization callback before connecting.
     setVisualizationCallback((fft, pcm) => {
       vizRef.current?.updateVisualization(fft, pcm);
     });
+
+    // Wire audio callback: feed PCM from server to the AudioWorklet for speaker output.
+    setAudioCallback((pcm) => {
+      feedPcm(pcm);
+    });
+
+    // Wire clear callback: flush ring buffer on seek/stop.
+    setClearAudioCallback(() => {
+      clearBuffer();
+    });
+
     connect(project.id);
     return () => {
       disconnect();
       setVisualizationCallback(null);
+      setAudioCallback(null);
+      setClearAudioCallback(null);
+      destroyWorklet();
     };
-  }, [project.id, connect, disconnect, setVisualizationCallback]);
+  }, [project.id, connect, disconnect, setVisualizationCallback, setAudioCallback, setClearAudioCallback, initWorklet, feedPcm, clearBuffer, destroyWorklet]);
 
   // Throttled cursor tracking.
   useEffect(() => {

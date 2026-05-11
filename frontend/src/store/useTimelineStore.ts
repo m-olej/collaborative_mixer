@@ -119,6 +119,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   laneOrder: [0],
 
   fetchTracks: async (projectId: number) => {
+    console.debug(`[Timeline:Store] fetchTracks project=${projectId}`);
     set({ loading: true, error: null });
     try {
       const { tracks, etags: rawEtags } = await api.listTracks(projectId);
@@ -126,21 +127,26 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       for (const [k, v] of Object.entries(rawEtags)) {
         etags[Number(k)] = v;
       }
+      console.debug(`[Timeline:Store] fetchTracks OK: ${tracks.length} tracks`, tracks);
       set({ tracks, etags, loading: false });
     } catch (e) {
+      console.error(`[Timeline:Store] fetchTracks FAILED`, e);
       set({ error: (e as Error).message, loading: false });
     }
   },
 
   placeTrack: async (projectId, data) => {
+    console.debug(`[Timeline:Store] placeTrack project=${projectId}`, data);
     try {
       const { track, etag } = await api.createTrack(projectId, data);
+      console.debug(`[Timeline:Store] placeTrack OK id=${track.id} s3_key=${track.s3_key} pos=${track.position_ms}ms lane=${track.lane_index}`);
       set((s) => ({
         tracks: [...s.tracks, track],
         etags: { ...s.etags, [track.id]: etag },
       }));
       return track;
     } catch (e) {
+      console.error(`[Timeline:Store] placeTrack FAILED`, e);
       set({ error: (e as Error).message });
       return null;
     }
@@ -148,8 +154,10 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   moveTrack: async (projectId, trackId, data) => {
     const etag = get().etags[trackId] || "";
+    console.debug(`[Timeline:Store] moveTrack project=${projectId} track=${trackId} etag=${etag}`, data);
     try {
       const result = await api.updateTrack(projectId, trackId, data, etag);
+      console.debug(`[Timeline:Store] moveTrack OK track=${trackId} new_pos=${result.track.position_ms}ms lane=${result.track.lane_index}`);
       set((s) => ({
         tracks: s.tracks.map((t) => (t.id === trackId ? result.track : t)),
         etags: { ...s.etags, [trackId]: result.etag },
@@ -157,6 +165,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       }));
       return result.track;
     } catch (e) {
+      console.error(`[Timeline:Store] moveTrack FAILED track=${trackId}`, e);
       // On 412 conflict, re-fetch all tracks.
       if ((e as Error).message.includes("Conflict")) {
         get().fetchTracks(projectId);
@@ -167,8 +176,10 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   },
 
   removeTrack: async (projectId, trackId) => {
+    console.debug(`[Timeline:Store] removeTrack project=${projectId} track=${trackId}`);
     try {
       await api.deleteTrack(projectId, trackId);
+      console.debug(`[Timeline:Store] removeTrack OK track=${trackId}`);
       set((s) => ({
         tracks: s.tracks.filter((t) => t.id !== trackId),
         etags: Object.fromEntries(
@@ -176,6 +187,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
         ),
       }));
     } catch (e) {
+      console.error(`[Timeline:Store] removeTrack FAILED track=${trackId}`, e);
       set({ error: (e as Error).message });
     }
   },
@@ -259,6 +271,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   addLane: () => {
     const { laneOrder, laneConfigs } = get();
     const newIndex = laneOrder.length === 0 ? 0 : Math.max(...laneOrder) + 1;
+    console.debug(`[Timeline:Store] addLane index=${newIndex}`);
     set({
       laneConfigs: {
         ...laneConfigs,
@@ -335,19 +348,27 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   handleTrackPlaced: (track) =>
     set((s) => {
-      if (s.tracks.some((t) => t.id === track.id)) return s;
+      if (s.tracks.some((t) => t.id === track.id)) {
+        console.debug(`[Timeline:Store] handleTrackPlaced SKIP duplicate id=${track.id}`);
+        return s;
+      }
+      console.debug(`[Timeline:Store] handleTrackPlaced id=${track.id} pos=${track.position_ms}ms lane=${track.lane_index}`);
       return { tracks: [...s.tracks, track] };
     }),
 
-  handleTrackMoved: (track) =>
+  handleTrackMoved: (track) => {
+    console.debug(`[Timeline:Store] handleTrackMoved id=${track.id} pos=${track.position_ms}ms lane=${track.lane_index}`);
     set((s) => ({
       tracks: s.tracks.map((t) => (t.id === track.id ? track : t)),
-    })),
+    }));
+  },
 
-  handleTrackRemoved: (trackId) =>
+  handleTrackRemoved: (trackId) => {
+    console.debug(`[Timeline:Store] handleTrackRemoved id=${trackId}`);
     set((s) => ({
       tracks: s.tracks.filter((t) => t.id !== trackId),
-    })),
+    }));
+  },
 
   handleRemoteLaneUpdate: (configs, order) =>
     set({ laneConfigs: configs, laneOrder: order }),

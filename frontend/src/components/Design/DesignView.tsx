@@ -124,6 +124,7 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
         input_history: localSample.inputHistory,
         bar_duration_ms: localSample.totalDurationMs,
         bar_count: localSample.barCount,
+        view_id: currentViewId,
       })
       .receive("ok", (resp: { sample_id: number; name: string }) => {
         setSaveState({
@@ -138,7 +139,7 @@ export function DesignView({ projectId, bpm, timeSignature, countInNoteValue: in
           Object.values(err.errors ?? {}).flat().join(", ") || "Save failed.";
         setSaveState({ status: "error", message: msg });
       });
-  }, [channel, sampleName, genre, localSample]);
+  }, [channel, sampleName, genre, localSample, currentViewId]);
 
   return (
     <div className="flex flex-col gap-4 p-6" style={{ maxWidth: "1400px", margin: "0 auto" }}>

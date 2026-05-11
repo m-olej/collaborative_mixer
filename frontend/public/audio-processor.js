@@ -50,8 +50,8 @@
  * frontend).
  */
 
-/** Ring buffer capacity in samples.  10 s at 44 100 Hz = 441 000 samples. */
-const CAPACITY = 441_000;
+/** Ring buffer capacity in samples.  10 s at 48 000 Hz = 480 000 samples. */
+const CAPACITY = 480_000;
 
 class CloudDawProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -96,6 +96,13 @@ class CloudDawProcessor extends AudioWorkletProcessor {
       //                           overlapping with other voices)
       if (data instanceof Float32Array) {
         this._appendToRing(data);
+      } else if (data && data.type === "clear") {
+        // Reset ring buffer — used on seek/stop to flush stale audio.
+        this._ring.fill(0);
+        this._writePos = 0;
+        this._readPos = 0;
+        this._available = 0;
+        this._voices.clear();
       } else if (data && data.type === "voice" && typeof data.midi === "number" && data.pcm instanceof Float32Array) {
         this._voiceMix(data.midi, data.pcm);
       } else if (data && data.type === "mix" && data.pcm instanceof Float32Array) {

@@ -92,4 +92,10 @@ impl ClipTree {
     pub fn is_empty(&self) -> bool {
         self.clips.is_empty()
     }
+
+    /// Get the maximum end_ms across all clips (timeline end).
+    /// Returns 0 if the tree is empty.
+    pub fn max_end_ms(&self) -> u64 {
+        self.clips.iter().map(|c| c.end_ms).max().unwrap_or(0)
+    }
 }

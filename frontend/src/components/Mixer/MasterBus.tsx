@@ -25,6 +25,8 @@ export function MasterBus({ masterVolume, playing, bpm, channel }: MasterBusProp
   const [volume, setVolume] = useState(masterVolume);
   const isPlaying = useTimelineStore((s) => s.playing);
   const playheadMs = useTimelineStore((s) => s.playheadMs);
+  const tracksLoadedCount = useSocketStore((s) => s.tracksLoadedCount);
+  const trackCount = useTimelineStore((s) => s.tracks.length);
   const { pushStartPlayback, pushStopPlayback } = useSocketStore();
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -87,6 +89,13 @@ export function MasterBus({ masterVolume, playing, bpm, channel }: MasterBusProp
       >
         {isPlaying ? "■ STOP" : "▶ PLAY"}
       </button>
+
+      {/* Track loading indicator */}
+      {trackCount > 0 && tracksLoadedCount < trackCount && (
+        <div className="text-center text-[10px] text-amber-400">
+          Loading {tracksLoadedCount}/{trackCount}
+        </div>
+      )}
 
       {/* BPM display */}
       <div className="mt-auto text-center">

@@ -46,7 +46,10 @@ export function TimelineClip({
   // Draw waveform peaks
   useEffect(() => {
     const canvas = waveformRef.current;
-    if (!canvas || !sample?.waveform_peaks?.length) return;
+    if (!canvas || !sample?.waveform_peaks?.length) {
+      console.debug(`[Timeline:Clip] waveform skip track=${track.id} name=${track.name} canvas=${!!canvas} peaks=${sample?.waveform_peaks?.length ?? 0}`);
+      return;
+    }
 
     // Match canvas internal resolution to displayed pixel width.
     const displayWidth = Math.max(Math.round(widthPx), 20);
@@ -56,6 +59,8 @@ export function TimelineClip({
     if (!ctx) return;
 
     const peaks = sample.waveform_peaks;
+    console.debug(`[Timeline:Clip] drawing waveform track=${track.id} name=${track.name} peaks=${peaks.length} width=${displayWidth}px duration=${durationMs}ms`);
+
     const W = canvas.width;
     const H = canvas.height;
     const midY = H / 2;

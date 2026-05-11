@@ -335,7 +335,7 @@ fn decode_and_load_track<'a>(
     audio_bytes: Binary<'a>,
     clip_start_ms: u64,
     source_offset_ms: u64,
-) -> NifResult<rustler::Atom> {
+) -> NifResult<u64> {
     let mut engine = engine_resource
         .0
         .lock()
@@ -365,7 +365,7 @@ fn decode_and_load_track<'a>(
         source_offset_ms,
     });
 
-    Ok(atoms::ok())
+    Ok(duration_ms)
 }
 
 /// Atomically replace the entire timeline with a new set of clips.
@@ -398,6 +398,20 @@ fn rebuild_timeline(
 
     engine.timeline.rebuild(clip_vec);
     Ok(atoms::ok())
+}
+
+/// Get the end timestamp (ms) of the last clip on the timeline.
+///
+/// Returns 0 if the timeline is empty.  Used by Elixir to implement
+/// auto-stop when the playhead passes all clips.
+#[rustler::nif]
+fn get_timeline_end(engine_resource: ResourceArc<ProjectEngineResource>) -> NifResult<u64> {
+    let engine = engine_resource
+        .0
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("engine lock poisoned")))?;
+
+    Ok(engine.timeline.max_end_ms())
 }
 
 /// Update per-track mixing parameters (volume, mute, pan).

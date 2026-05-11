@@ -7,6 +7,8 @@ defmodule Backend.Application do
 
   @impl true
   def start(_type, _args) do
+    ensure_s3_bucket()
+
     children = [
       BackendWeb.Telemetry,
       Backend.Repo,
@@ -32,5 +34,24 @@ defmodule Backend.Application do
   def config_change(changed, _new, removed) do
     BackendWeb.Endpoint.config_change(changed, removed)
     :ok
+  end
+
+  # Ensure the MinIO bucket exists on startup (dev convenience).
+  defp ensure_s3_bucket do
+    bucket = "cloud-daw"
+
+    case ExAws.S3.head_bucket(bucket) |> ExAws.request() do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        case ExAws.S3.put_bucket(bucket, "us-east-1") |> ExAws.request() do
+          {:ok, _} ->
+            IO.puts("[Application] Created S3 bucket '#{bucket}'")
+
+          {:error, reason} ->
+            IO.puts("[Application] Could not create S3 bucket '#{bucket}': #{inspect(reason)}")
+        end
+    end
   end
 end

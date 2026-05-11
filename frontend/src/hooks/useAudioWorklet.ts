@@ -14,7 +14,7 @@ export function useAudioWorklet() {
   const init = useCallback(async () => {
     if (ctxRef.current) return; // already initialized
 
-    const ctx = new AudioContext({ sampleRate: 44100 });
+    const ctx = new AudioContext({ sampleRate: 48000 });
     await ctx.audioWorklet.addModule("/audio-processor.js");
 
     const node = new AudioWorkletNode(ctx, "cloud-daw-processor");
@@ -54,6 +54,11 @@ export function useAudioWorklet() {
     nodeRef.current?.port.postMessage({ type: "voice", midi, pcm });
   }, []);
 
+  /** Flush the ring buffer — used on seek/stop to prevent stale audio. */
+  const clearBuffer = useCallback(() => {
+    nodeRef.current?.port.postMessage({ type: "clear" });
+  }, []);
+
   /** Tear down the audio context. */
   const destroy = useCallback(() => {
     nodeRef.current?.disconnect();
@@ -70,5 +75,5 @@ export function useAudioWorklet() {
   /** Get the AnalyserNode for real-time visualization. */
   const getAnalyser = useCallback(() => analyserRef.current, []);
 
-  return { init, feedPcm, mixPcm, voicePcm, getContext, getAnalyser, destroy };
+  return { init, feedPcm, mixPcm, voicePcm, clearBuffer, getContext, getAnalyser, destroy };
 }

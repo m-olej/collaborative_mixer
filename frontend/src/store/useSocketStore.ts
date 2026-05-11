@@ -8,6 +8,9 @@ import { useTimelineStore } from "./useTimelineStore";
 /** Callback for feeding decoded audio frames to the visualization. */
 export type VisualizationCallback = (fft: Uint8Array, pcm: Float32Array) => void;
 
+/** Callback for feeding PCM audio to the AudioWorklet for playback. */
+export type AudioDataCallback = (pcm: Float32Array) => void;
+
 interface SocketState {
   socket: Socket | null;
   channel: Channel | null;
@@ -15,9 +18,17 @@ interface SocketState {
   mixerState: MixerState | null;
   /** Set by ProjectWorkspace to wire visualization updates. */
   onVisualizationData: VisualizationCallback | null;
+  /** Set by ProjectWorkspace to wire PCM audio to the AudioWorklet. */
+  onAudioData: AudioDataCallback | null;
+  /** Set by ProjectWorkspace to flush the AudioWorklet ring buffer on seek/stop. */
+  onClearAudio: (() => void) | null;
+  /** Number of tracks loaded into the engine so far. */
+  tracksLoadedCount: number;
   connect: (projectId: number) => void;
   disconnect: () => void;
   setVisualizationCallback: (cb: VisualizationCallback | null) => void;
+  setAudioCallback: (cb: AudioDataCallback | null) => void;
+  setClearAudioCallback: (cb: (() => void) | null) => void;
   pushCursorMove: (x: number, y: number, view?: string) => void;
   pushSelectionUpdate: (selection: CollabSelection | null) => void;
   pushStartPlayback: (cursorMs: number) => void;
@@ -32,8 +43,13 @@ export const useSocketStore = create<SocketState>((set, get) => ({
   connected: false,
   mixerState: null,
   onVisualizationData: null,
+  onAudioData: null,
+  onClearAudio: null,
+  tracksLoadedCount: 0,
 
   setVisualizationCallback: (cb) => set({ onVisualizationData: cb }),
+  setAudioCallback: (cb) => set({ onAudioData: cb }),
+  setClearAudioCallback: (cb) => set({ onClearAudio: cb }),
 
   connect: (projectId: number) => {
     // Tear down previous connection if any
@@ -87,7 +103,7 @@ export const useSocketStore = create<SocketState>((set, get) => ({
       }
     });
 
-    // --- Binary frame handlers (visualization) ---
+    // --- Binary frame handlers (visualization + audio playback) ---
     const feedViz = (payload: unknown) => {
       if (!(payload instanceof ArrayBuffer)) return;
       const fft = new Uint8Array(payload, 4, 512);
@@ -95,9 +111,21 @@ export const useSocketStore = create<SocketState>((set, get) => ({
       get().onVisualizationData?.(fft, pcm);
     };
 
+    // Mixer audio frames: feed both visualization AND AudioWorklet for speaker output.
+    channel.on("audio_frame", (payload: unknown) => {
+      if (!(payload instanceof ArrayBuffer)) {
+        console.debug("[Timeline:WS] audio_frame received non-ArrayBuffer", typeof payload);
+        return;
+      }
+      const fft = new Uint8Array(payload, 4, 512);
+      const pcm = new Float32Array(payload, 516);
+      console.debug(`[Timeline:WS] audio_frame ${payload.byteLength}B, PCM samples=${pcm.length}`);
+      get().onVisualizationData?.(fft, pcm);
+      get().onAudioData?.(pcm);
+    });
+
     channel.on("audio_buffer", feedViz);
     channel.on("bar_audio", feedViz);
-    channel.on("audio_frame", feedViz);
     channel.on("note_audio", (payload: unknown) => {
       if (!(payload instanceof ArrayBuffer)) return;
       const fft = new Uint8Array(payload, 4, 512);
@@ -107,13 +135,31 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
     // --- Track broadcast handlers (timeline sync) ---
     channel.on("track_placed", (payload: { track: Record<string, unknown> }) => {
+      console.debug("[Timeline:WS] track_placed", payload.track);
       useTimelineStore.getState().handleTrackPlaced(payload.track as never);
     });
     channel.on("track_moved", (payload: { track: Record<string, unknown> }) => {
+      console.debug("[Timeline:WS] track_moved", payload.track);
       useTimelineStore.getState().handleTrackMoved(payload.track as never);
     });
     channel.on("track_removed", (payload: { track_id: number }) => {
+      console.debug("[Timeline:WS] track_removed id=", payload.track_id);
       useTimelineStore.getState().handleTrackRemoved(payload.track_id);
+    });
+
+    // --- Playback lifecycle events ---
+    channel.on("playback_ended", () => {
+      console.debug("[Timeline:WS] playback_ended");
+      useTimelineStore.getState().setPlaying(false);
+      get().onClearAudio?.();
+    });
+    channel.on("playhead_sync", (payload: { cursor_ms: number }) => {
+      console.debug("[Timeline:WS] playhead_sync cursor_ms=", payload.cursor_ms);
+      useTimelineStore.getState().setPlayheadMs(payload.cursor_ms);
+    });
+    channel.on("track_loading_progress", (payload: { loaded_count: number }) => {
+      console.debug("[Timeline:WS] track_loading_progress loaded=", payload.loaded_count);
+      set({ tracksLoadedCount: payload.loaded_count });
     });
 
     // --- Presence handlers (collaboration) ---
@@ -188,6 +234,7 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
     // --- Lane config sync ---
     channel.on("lane_update", (payload: { lane_configs: Record<string, { name: string; color: string }>; lane_order: number[] }) => {
+      console.debug("[Timeline:WS] lane_update", payload);
       const configs: Record<number, { name: string; color: string }> = {};
       for (const [k, v] of Object.entries(payload.lane_configs)) {
         configs[Number(k)] = v;
@@ -212,7 +259,7 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     const { channel, socket } = get();
     if (channel) channel.leave();
     if (socket) socket.disconnect();
-    set({ socket: null, channel: null, connected: false, mixerState: null });
+    set({ socket: null, channel: null, connected: false, mixerState: null, tracksLoadedCount: 0 });
   },
 
   pushCursorMove: (x, y, view) => {
@@ -226,6 +273,7 @@ export const useSocketStore = create<SocketState>((set, get) => ({
   pushStartPlayback: (cursorMs) => {
     const ch = get().channel;
     if (!ch) return;
+    console.debug(`[Timeline:WS] pushStartPlayback cursor=${cursorMs}ms`);
     useTimelineStore.getState().setPlaying(true);
     useTimelineStore.getState().setPlayheadMs(cursorMs);
     ch.push("start_playback", { cursor_ms: cursorMs });
@@ -234,6 +282,8 @@ export const useSocketStore = create<SocketState>((set, get) => ({
   pushStopPlayback: () => {
     const ch = get().channel;
     if (!ch) return;
+    console.debug("[Timeline:WS] pushStopPlayback");
+    get().onClearAudio?.();
     useTimelineStore.getState().setPlaying(false);
     ch.push("stop_playback", {});
   },
@@ -241,11 +291,14 @@ export const useSocketStore = create<SocketState>((set, get) => ({
   pushSeek: (cursorMs) => {
     const ch = get().channel;
     if (!ch) return;
+    console.debug(`[Timeline:WS] pushSeek cursor=${cursorMs}ms`);
+    get().onClearAudio?.();
     useTimelineStore.getState().setPlayheadMs(cursorMs);
     ch.push("seek", { cursor_ms: cursorMs });
   },
 
   pushLaneUpdate: (configs, order) => {
+    console.debug("[Timeline:WS] pushLaneUpdate", { configs, order });
     get().channel?.push("lane_update", { lane_configs: configs, lane_order: order });
   },
 }));

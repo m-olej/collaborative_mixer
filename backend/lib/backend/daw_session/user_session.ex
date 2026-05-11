@@ -28,6 +28,8 @@ defmodule Backend.DawSession.UserSession do
   """
   use GenServer
 
+  require Logger
+
   alias Backend.DawSession.ProjectSession
 
   # ---------------------------------------------------------------------------
@@ -110,7 +112,8 @@ defmodule Backend.DawSession.UserSession do
       cursor_ms: 0,
       playing: false,
       timer_ref: nil,
-      playback_view_id: "mixer"
+      playback_view_id: "mixer",
+      tick_count: 0
     }
 
     {:ok, state}
@@ -137,42 +140,67 @@ defmodule Backend.DawSession.UserSession do
 
   @impl true
   def handle_cast({:start_playback, cursor_ms, view_id}, state) do
+    cursor_ms = round(cursor_ms)
+
+    Logger.debug(
+      "[UserSession] start_playback user=#{state.username} cursor=#{cursor_ms}ms view=#{view_id} project=#{state.project_id}"
+    )
+
     state = cancel_timer(state)
 
     # Pre-roll burst: 200 ms chunk pushed immediately.
     case ProjectSession.mix_chunk(state.project_id, cursor_ms, 200) do
       {:ok, burst_binary} ->
+        Logger.debug(
+          "[UserSession] burst OK user=#{state.username} #{byte_size(burst_binary)} bytes from #{cursor_ms}ms"
+        )
+
         deliver_to_channel(state, view_id, burst_binary)
 
-      {:error, _reason} ->
-        :ok
+      {:error, reason} ->
+        Logger.debug("[UserSession] burst FAILED user=#{state.username}: #{inspect(reason)}")
     end
 
     # Start paced push: 50 ms interval.
     new_cursor = cursor_ms + 200
     {:ok, timer_ref} = :timer.send_interval(50, self(), :push_chunk)
 
+    Logger.debug(
+      "[UserSession] pacing started user=#{state.username} next_cursor=#{new_cursor}ms"
+    )
+
     {:noreply,
      %{
        state
        | cursor_ms: new_cursor,
          playing: true,
          timer_ref: timer_ref,
-         playback_view_id: view_id
+         playback_view_id: view_id,
+         tick_count: 0
      }}
   end
 
   @impl true
   def handle_cast({:seek, cursor_ms, view_id}, state) do
+    cursor_ms = round(cursor_ms)
+
+    Logger.debug(
+      "[UserSession] seek user=#{state.username} to #{cursor_ms}ms view=#{view_id} project=#{state.project_id}"
+    )
+
     state = cancel_timer(state)
 
     # New burst from seek position.
     case ProjectSession.mix_chunk(state.project_id, cursor_ms, 200) do
       {:ok, burst_binary} ->
+        Logger.debug(
+          "[UserSession] seek burst OK user=#{state.username} #{byte_size(burst_binary)} bytes"
+        )
+
         deliver_to_channel(state, view_id, burst_binary)
 
-      {:error, _reason} ->
-        :ok
+      {:error, reason} ->
+        Logger.debug("[UserSession] seek burst FAILED user=#{state.username}: #{inspect(reason)}")
     end
 
     new_cursor = cursor_ms + 200
@@ -184,12 +212,17 @@ defmodule Backend.DawSession.UserSession do
        | cursor_ms: new_cursor,
          playing: true,
          timer_ref: timer_ref,
-         playback_view_id: view_id
+         playback_view_id: view_id,
+         tick_count: 0
      }}
   end
 
   @impl true
   def handle_cast(:stop_playback, state) do
+    Logger.debug(
+      "[UserSession] stop_playback user=#{state.username} at cursor=#{state.cursor_ms}ms project=#{state.project_id}"
+    )
+
     {:noreply, cancel_timer(%{state | playing: false})}
   end
 
@@ -197,15 +230,46 @@ defmodule Backend.DawSession.UserSession do
   @impl true
   def handle_info(:push_chunk, state) do
     if state.playing do
-      case ProjectSession.mix_chunk(state.project_id, state.cursor_ms, 50) do
-        {:ok, binary} ->
-          deliver_to_channel(state, state.playback_view_id, binary)
+      # Check if we've passed the end of the timeline (auto-stop).
+      timeline_end = ProjectSession.get_timeline_end(state.project_id)
 
-        {:error, _reason} ->
-          :ok
+      if timeline_end > 0 and state.cursor_ms > timeline_end do
+        # Past all clips — stop playback and notify the client.
+        Logger.debug(
+          "[UserSession] auto-stop user=#{state.username} cursor=#{state.cursor_ms}ms > timeline_end=#{timeline_end}ms"
+        )
+
+        if state.channel_pid && Process.alive?(state.channel_pid) do
+          send(state.channel_pid, :playback_ended)
+        end
+
+        {:noreply, cancel_timer(%{state | playing: false})}
+      else
+        case ProjectSession.mix_chunk(state.project_id, state.cursor_ms, 50) do
+          {:ok, binary} ->
+            deliver_to_channel(state, state.playback_view_id, binary)
+
+          {:error, reason} ->
+            Logger.debug(
+              "[UserSession] push_chunk FAILED user=#{state.username} cursor=#{state.cursor_ms}ms: #{inspect(reason)}"
+            )
+        end
+
+        # Periodic playhead sync: every 10th tick (~500 ms) notify the client
+        # of the server-authoritative cursor position to prevent drift.
+        new_cursor = state.cursor_ms + 50
+        tick_count = Map.get(state, :tick_count, 0) + 1
+
+        if (rem(tick_count, 10) == 0 and state.channel_pid) && Process.alive?(state.channel_pid) do
+          Logger.debug(
+            "[UserSession] playhead_sync user=#{state.username} cursor=#{new_cursor}ms tick=#{tick_count}"
+          )
+
+          send(state.channel_pid, {:playhead_sync, new_cursor})
+        end
+
+        {:noreply, %{state | cursor_ms: new_cursor, tick_count: tick_count}}
       end
-
-      {:noreply, %{state | cursor_ms: state.cursor_ms + 50}}
     else
       {:noreply, state}
     end

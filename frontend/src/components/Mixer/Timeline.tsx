@@ -125,10 +125,12 @@ export function Timeline({ project, samples }: TimelineProps) {
 
       if (playing) {
         // Seek while playing.
+        console.debug(`[Timeline:UI] ruler seek to ${clickMs.toFixed(1)}ms (playing)`);
         pushSeek(clickMs);
         playStartRef.current = { wallMs: performance.now(), cursorMs: clickMs };
       } else {
         // Click to start playback from this position.
+        console.debug(`[Timeline:UI] ruler start playback at ${clickMs.toFixed(1)}ms`);
         pushStartPlayback(clickMs);
       }
     },
@@ -230,10 +232,13 @@ export function Timeline({ project, samples }: TimelineProps) {
           const rawMs = dropX / pxPerMs;
           const positionMs = snapPositionMs(rawMs);
 
+          console.debug(`[Timeline:UI] clip drop track=${trackId} from lane=${origLane} to lane=${laneIndex} pos=${positionMs.toFixed(1)}ms selected=${selectedIds}`);
+
           if (selectedIds.length > 1) {
             const origTrack = tracks.find((t) => t.id === trackId);
             const deltaMs = positionMs - (origTrack?.position_ms ?? 0);
             const deltaLane = laneIndex - origLane;
+            console.debug(`[Timeline:UI] batch move delta_ms=${deltaMs.toFixed(1)} delta_lane=${deltaLane} ids=${selectedIds}`);
             batchMoveSelectedTracks(project.id, deltaMs, deltaLane, selectedIds);
           } else {
             moveTrack(project.id, trackId, {
@@ -258,6 +263,8 @@ export function Timeline({ project, samples }: TimelineProps) {
         const dropX = e.clientX - rect.left + scrollLeft;
         const rawMs = dropX / pxPerMs;
         const positionMs = snapPositionMs(rawMs);
+
+        console.debug(`[Timeline:UI] sample drop name=${sample.name} id=${sample.id} lane=${laneIndex} pos=${positionMs.toFixed(1)}ms duration=${sample.duration_ms}ms`);
 
         placeTrack(project.id, {
           name: sample.name,

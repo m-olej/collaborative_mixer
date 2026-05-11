@@ -1,6 +1,8 @@
 defmodule BackendWeb.TrackController do
   use BackendWeb, :controller
 
+  require Logger
+
   alias Backend.Projects
   alias Backend.Samples
 
@@ -26,6 +28,8 @@ defmodule BackendWeb.TrackController do
   end
 
   def create(conn, %{"project_id" => project_id, "track" => params}) do
+    Logger.debug("[TrackController] create project=#{project_id} params=#{inspect(params)}")
+
     # Look up the sample to get s3_key and duration info.
     s3_key =
       case params["sample_id"] do
@@ -34,8 +38,19 @@ defmodule BackendWeb.TrackController do
 
         sample_id ->
           case Samples.get_sample(sample_id) do
-            {:ok, sample} -> sample.s3_key
-            {:error, _} -> params["s3_key"] || "unknown"
+            {:ok, sample} ->
+              Logger.debug(
+                "[TrackController] resolved sample_id=#{sample_id} -> s3_key=#{sample.s3_key}"
+              )
+
+              sample.s3_key
+
+            {:error, _} ->
+              Logger.debug(
+                "[TrackController] sample_id=#{sample_id} not found, using s3_key from params"
+              )
+
+              params["s3_key"] || "unknown"
           end
       end
 
@@ -47,6 +62,10 @@ defmodule BackendWeb.TrackController do
     }
 
     with {:ok, track} <- Projects.create_track(project_id, track_attrs) do
+      Logger.debug(
+        "[TrackController] track created id=#{track.id} s3_key=#{s3_key} position=#{track.position_ms}ms lane=#{track.lane_index}"
+      )
+
       # Broadcast to all clients in the project channel.
       BackendWeb.Endpoint.broadcast(
         "project:#{project_id}",
@@ -55,8 +74,16 @@ defmodule BackendWeb.TrackController do
       )
 
       # Load the new track's audio into the DSP engine and rebuild the timeline.
-      if GenServer.whereis({:via, Registry, {Backend.SessionRegistry, project_id}}) do
-        Backend.DawSession.ProjectSession.load_and_rebuild(project_id, track)
+      int_project_id =
+        if is_binary(project_id), do: String.to_integer(project_id), else: project_id
+
+      if GenServer.whereis({:via, Registry, {Backend.SessionRegistry, int_project_id}}) do
+        Logger.debug("[TrackController] triggering load_and_rebuild for track #{track.id}")
+        Backend.DawSession.ProjectSession.load_and_rebuild(int_project_id, track)
+      else
+        Logger.debug(
+          "[TrackController] no active session for project #{project_id} (int=#{int_project_id}), skipping load_and_rebuild"
+        )
       end
 
       conn
